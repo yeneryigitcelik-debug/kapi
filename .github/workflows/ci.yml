@@ -1,0 +1,33 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: test (node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node: [20, 22, 24]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci
+      - name: Tek bağımlılık güvencesi (yalnız yaml)
+        run: |
+          node -e "const d=require('./package.json').dependencies||{};const n=Object.keys(d);if(n.length!==1||n[0]!=='yaml'){console.error('Beklenen tek dep: yaml — bulunan:',n);process.exit(1)}"
+      - run: node test-e2e.js
+
+  docker:
+    name: docker build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t kapi:ci .

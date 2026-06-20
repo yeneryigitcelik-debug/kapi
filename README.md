@@ -6,6 +6,7 @@
 
 Ollama ve OpenAI-uyumlu sağlayıcıları tek bir uçta toplar, model çökerse otomatik yedeğe geçer, modelleri Türkçe görevlerle değerlendirir — ve bunu **tek bağımlılıkla** yapar.
 
+[![ci](https://github.com/yeneryigitcelik-debug/kapi/actions/workflows/ci.yml/badge.svg)](https://github.com/yeneryigitcelik-debug/kapi/actions/workflows/ci.yml)
 [![Lisans: MIT](https://img.shields.io/badge/lisans-MIT-blue.svg)](./LICENSE)
 ![Node](https://img.shields.io/badge/node-%E2%89%A520-brightgreen.svg)
 ![Bağımlılık](https://img.shields.io/badge/ba%C4%9F%C4%B1ml%C4%B1l%C4%B1k-1%20%C2%B7%20yaml-success.svg)
@@ -141,6 +142,33 @@ client.chat.completions.create(
     messages=[{"role": "user", "content": "Merhaba"}],
 )
 ```
+
+---
+
+## Dağıtım (Docker · PM2)
+
+### Docker
+
+```bash
+docker build -t kapi .
+docker run --rm -p 127.0.0.1:4100:4100 \
+  -v "$PWD/kapi.yaml:/app/kapi.yaml:ro" \
+  kapi up --host 0.0.0.0
+```
+
+Görüntü KVKK-first kalır: host portunu **`127.0.0.1`'e** bağla (yukarıdaki gibi), böylece
+yalnız yerelden erişilir. Konteyner içinde `--host 0.0.0.0` gerekir (banner uyarır); dışa
+gerçekten açıyorsan `require_key: true` şart.
+
+### PM2 (örn. Hetzner)
+
+```bash
+pm2 start ecosystem.config.cjs   # kapi.yaml çalışılan dizinde olmalı
+pm2 save && pm2 startup          # reboot sonrası otomatik ayağa kalk
+```
+
+Anahtarları sistemde `export KAPI_KEY=...` ile ver; PM2 ortamı devralır (config'e düz
+metin yazma).
 
 ---
 
@@ -313,6 +341,9 @@ npm ls --all         # yalnızca yaml@2 görünmeli — projenin konumlama iddia
 Test, gerçek model gerektirmez: PII dedektörlerinin birim testleri + üç sahte upstream
 (OK / hep-500 / SSE-stream) ile auth, maskeleme, fallback, hata yolları, streaming,
 PII redaksiyonu, per-key scope ve audit logunu doğrular.
+
+**CI:** GitHub Actions her push/PR'da test matrisini (Node 20/22/24) + tek-bağımlılık
+güvencesini + Docker build'i koşar.
 
 ---
 
