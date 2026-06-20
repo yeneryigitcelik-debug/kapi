@@ -12,6 +12,8 @@ Ollama, Anthropic ve OpenAI-uyumlu sağlayıcıları tek bir uçta toplar, model
 ![Bağımlılık](https://img.shields.io/badge/ba%C4%9F%C4%B1ml%C4%B1l%C4%B1k-1%20%C2%B7%20yaml-success.svg)
 ![Sunucu](https://img.shields.io/badge/sunucu-native%20node%3Ahttp-informational.svg)
 
+**Türkçe** · [English](./README.en.md)
+
 </div>
 
 ```
@@ -378,23 +380,4 @@ satırında.
 
 [MIT](./LICENSE) © 2026 Yener Yiğit Çelik
 
-<details>
-<summary>🇬🇧 English summary</summary>
-
-**kapı** is a security-first, privacy-by-default local LLM gateway. It puts a single
-OpenAI-compatible endpoint in front of Ollama, Anthropic, and OpenAI-compatible providers (DeepSeek,
-vLLM, OpenRouter), with automatic fallback on `5xx/429/network` errors, response-side
-model masking (streaming included), constant-time key auth, **PII redaction** (TCKN/phone/
-email/IBAN scrubbed before content leaves to external providers), **per-key model scoping**,
-a metadata-only **audit log**, and a built-in, judge-free Turkish evaluation suite
-(`kapi eval`). Its defining constraint: **a single runtime dependency (`yaml`)** and a
-native `node:http` server — a deliberately tiny attack surface. Localhost-only by default;
-prompt/response bodies are never written to disk. Requires Node ≥ 20.
-
-```bash
-git clone https://github.com/yeneryigitcelik-debug/kapi.git
-cd kapi && npm install
-node bin/kapi.js init && node bin/kapi.js up
-```
-
-</details>
+> 🇬🇧 Full English documentation: **[README.en.md](./README.en.md)**
