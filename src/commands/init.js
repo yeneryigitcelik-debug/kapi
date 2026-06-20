@@ -21,8 +21,15 @@ security:
   keys: []
   # Örnek (env'den enjekte etmen önerilir):
   #   keys:
-  #     - \${KAPI_KEY}        # export KAPI_KEY=${sampleKey}
+  #     - \${KAPI_KEY}            # export KAPI_KEY=${sampleKey}
+  #     - key: \${UYGULAMA_KEY}   # scope'lu anahtar: yalnız listedeki modelleri görür
+  #       models: [yerel-hizli]
   log_bodies: false
+
+  # KVKK: dış sağlayıcıya gitmeden hassas veriyi maskele (yerel ollama hariç).
+  redact_pii: false
+  pii: [tckn, telefon, email, iban]
+  # audit_log: kapi-audit.jsonl    # istek metadata'sı (içerik YOK)
 
 routing:
   timeout_ms: 120000

@@ -12,8 +12,16 @@ security:
   require_key: false
   keys: []
   # keys:
-  #   - ${KAPI_KEY}
-  log_bodies: false
+  #   - ${KAPI_KEY}                  # kısıtsız anahtar
+  #   - key: ${UYGULAMA_KEY}         # scope'lu: bu anahtar yalnız listedeki modelleri görür
+  #     models: [yerel-hizli]        #   (fallback bile scope dışına çıkamaz → 403)
+  log_bodies: false                  # KVKK: prod'da açma (içerik diske yazılır)
+
+  # KVKK: dış sağlayıcıya GİTMEDEN hassas veriyi maskele. Yerel 'ollama' hariç tutulur;
+  # bir modelde 'redact: true/false' ile override edebilirsin.
+  redact_pii: false
+  pii: [tckn, telefon, email, iban]
+  # audit_log: kapi-audit.jsonl      # istek başına SADECE metadata (model/status/ms) — içerik YOK
 
 routing:
   timeout_ms: 120000

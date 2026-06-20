@@ -1,6 +1,6 @@
 {
   "name": "kapi",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "KVKK-first yerel LLM gateway — Ollama + OpenAI-uyumlu sağlayıcıları tek uçta toplar, fallback yapar, Türkçe değerlendirir.",
   "type": "module",
   "bin": {

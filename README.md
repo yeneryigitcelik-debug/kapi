@@ -73,8 +73,15 @@ API anahtarları oradan geçer. O yüzden bir gateway'de en çok istediğin şey
 - **🇹🇷 KVKK-first varsayılanlar.** Yalnızca `127.0.0.1` dinler. Prompt/yanıt içeriği
   **diske yazılmaz** (`log_bodies: false`). Veriler senin sunucunda kalır; yurt dışına
   zorunlu bir tur atmaz.
+- **🧹 PII redaksiyonu.** İçerik **dış sağlayıcıya gitmeden** TCKN (checksum doğrulamalı),
+  telefon, e-posta ve IBAN (mod-97 doğrulamalı) maskelenir. Yerel `ollama` muaftır — veri
+  zaten makineden çıkmıyor. (`redact_pii: true`)
+- **🪪 Per-key model scope.** Bir anahtar yalnız kendine tanımlı modelleri görür ve çağırır;
+  fallback zinciri bile scope dışına **kaçamaz** (403). `/v1/models` de scope'a göre filtrelenir.
+- **📋 Denetim günlüğü.** İstek başına yalnız metadata (model, status, ms, fallback, kaç PII
+  maskelendi) JSONL'e yazılır — **içerik asla.** (`audit_log`)
 - **🎭 Model maskeleme.** İstemci sadece takma adı görür. Gerçek model adı ve `api_base`
-  yanıtlara sızmaz — hangi modeli/sağlayıcıyı kullandığın senin bilgin.
+  yanıtlara sızmaz — stream modunda bile `model` alanı takma adla yeniden yazılır.
 - **🔑 Anahtarlar koda/config'e düz metin girmez.** `${ENV}` ile enjekte edilir; değişken
   eksikse gateway **sessizce boş geçmez, net hata fırlatır.**
 - **⏱ Sabit zamanlı kimlik doğrulama.** Anahtarlar SHA-256 hash'lenip
@@ -150,8 +157,13 @@ server:
 security:
   require_key: false       # üretimde true yap
   keys:                    # düz metin değil — env'den enjekte et
-    - ${KAPI_KEY}
+    - ${KAPI_KEY}          # kısıtsız anahtar
+    - key: ${UYGULAMA_KEY} # scope'lu: yalnız bu modelleri görür/çağırır
+      models: [yerel-hizli]
   log_bodies: false        # prod'da ASLA açma (prompt/yanıt içeriği diske yazılır)
+  redact_pii: true         # dış sağlayıcıya gitmeden PII maskele (yerel ollama hariç)
+  pii: [tckn, telefon, email, iban]
+  audit_log: kapi-audit.jsonl   # istek metadata'sı (içerik YOK)
 
 routing:
   timeout_ms: 120000
@@ -184,8 +196,8 @@ gerekli; isimler benzersiz olmalı; her fallback tanımlı bir modele işaret et
 
 | Uç | Auth | Açıklama |
 | --- | :---: | --- |
-| `POST /v1/chat/completions` | ✓ | OpenAI-uyumlu sohbet. `stream: true` destekli. Fallback + maskeleme burada. |
-| `GET /v1/models` | ✓ | Takma adları listeler. Gerçek model adı / `api_base` **sızmaz**. |
+| `POST /v1/chat/completions` | ✓ | OpenAI-uyumlu sohbet. `stream: true` destekli. Fallback + maskeleme + PII redaksiyonu burada. |
+| `GET /v1/models` | ✓ | Takma adları listeler (scope'lu anahtarda filtrelenir). Gerçek model adı / `api_base` **sızmaz**. |
 | `GET /health` · `/healthz` | — | `{ "status": "ok", "models": N }`. Auth gerektirmez. |
 
 Hatalar OpenAI hata zarfında döner: `{ "error": { "message", "type", "code" } }`.
@@ -246,9 +258,12 @@ Türkçe skorunu düşürürse görürsün.
 | --- | --- |
 | Bağımlılık / supply-chain saldırısı | Tek runtime dep (`yaml`). `npm ls --all` = tek paket. |
 | Veri yurt dışına çıkışı (KVKK) | Varsayılan `127.0.0.1`; içerik diske yazılmaz. |
+| Hassas veri (PII) dış sağlayıcıya gider | `redact_pii`: TCKN/telefon/e-posta/IBAN, gönderim öncesi maskelenir (yerel ollama hariç). |
 | Anahtar sızıntısı (repo/log) | Anahtarlar `${ENV}`'den; config'e düz metin girmez. |
 | Yetkisiz erişim | `require_key` + SHA-256 hash + `timingSafeEqual` (sabit zaman). |
-| Model/altyapı parmak izi | Maskeleme: takma ad dışında hiçbir şey sızmaz. |
+| Bir anahtarla izinsiz model/maliyet | Per-key scope: anahtar yalnız izinli modelleri çağırır, fallback bile kaçamaz. |
+| İzlenebilirlik / denetim | `audit_log`: metadata-only JSONL (kim, hangi model, status, ms) — içerik yok. |
+| Model/altyapı parmak izi | Maskeleme: takma ad dışında hiçbir şey sızmaz (stream dahil). |
 | Gereksiz yeniden deneme / maliyet | `4xx` fallback tetiklemez; yalnız geçici hatalarda yedek. |
 
 > Dışa açmadan önce: `require_key: true`, güçlü bir `${KAPI_KEY}`, güvenlik duvarı ve
@@ -266,10 +281,12 @@ src/
   util/args.js           bağımlılıksız argüman ayrıştırıcı
   util/log.js            bağımlılıksız, TTY-duyarlı logger
   core/config.js         YAML yükle + ${ENV} enjekte + doğrula
-  core/router.js         model çöz + fallback zinciri + stream passthrough
-  core/server.js         native http, OpenAI-uyumlu uçlar
+  core/router.js         model çöz + fallback + PII redaksiyon + stream maskeleme
+  core/server.js         native http, OpenAI-uyumlu uçlar, audit
   providers/index.js     ollama + openai-compatible adaptörleri
-  middleware/auth.js     sabit zamanlı anahtar kontrolü
+  middleware/auth.js     sabit zamanlı anahtar kontrolü + per-key scope
+  security/pii.js        PII dedektörleri (TCKN/IBAN doğrulamalı) + redaksiyon
+  security/audit.js      metadata-only denetim günlüğü (JSONL)
   commands/
     up.js                gateway başlat + banner + graceful shutdown
     init.js              örnek kapi.yaml üret
@@ -278,27 +295,30 @@ src/
 test-e2e.js              sahte upstream'lerle uçtan uca test
 ```
 
-**İstek akışı:** `server` gövdeyi (≤10MB) okur → `auth` anahtarı doğrular → `router`
-deneme zincirini (`[istenen, ...fallbacks]`) kurar → `provider` upstream'e gider →
-başarıda yanıt maskelenip istemciye yazılır, geçici hatada sıradaki modele geçilir.
+**İstek akışı:** `server` gövdeyi (≤10MB) okur → `auth` anahtarı doğrular ve scope'u çözer →
+`router` deneme zincirini (`[istenen, ...fallbacks]`, scope'la filtreli) kurar → dış sağlayıcıysa
+**PII maskelenir** → `provider` upstream'e gider → başarıda yanıt (model adı) maskelenip istemciye
+yazılır, geçici hatada sıradaki modele geçilir → sonda yalnız metadata `audit_log`'a düşer.
 
 ---
 
 ## Geliştirme ve test
 
 ```bash
-node test-e2e.js     # sahte upstream'lerle uçtan uca — 16 assertion, hepsi geçmeli
+node test-e2e.js     # PII birim + uçtan uca — 32 assertion, hepsi geçmeli
 npm test             # = yukarısı
 npm ls --all         # yalnızca yaml@2 görünmeli — projenin konumlama iddiası
 ```
 
-Test, gerçek model gerektirmez: üç sahte upstream (OK / hep-500 / SSE-stream) ile
-auth, maskeleme, fallback, hata yolları ve streaming'i doğrular.
+Test, gerçek model gerektirmez: PII dedektörlerinin birim testleri + üç sahte upstream
+(OK / hep-500 / SSE-stream) ile auth, maskeleme, fallback, hata yolları, streaming,
+PII redaksiyonu, per-key scope ve audit logunu doğrular.
 
 ---
 
 ## Yol haritası
 
+- [x] **0.2.0** — PII redaksiyonu, per-key model scope, denetim günlüğü, stream model maskeleme
 - [ ] Anthropic native sağlayıcı
 - [ ] Model-bazlı rate limit
 - [ ] `eval --export json` (CI regresyon takibi)
@@ -328,10 +348,12 @@ satırında.
 **kapı** is a security-first, privacy-by-default local LLM gateway. It puts a single
 OpenAI-compatible endpoint in front of Ollama and OpenAI-compatible providers (DeepSeek,
 vLLM, OpenRouter), with automatic fallback on `5xx/429/network` errors, response-side
-model masking, constant-time key auth, and a built-in, judge-free Turkish evaluation
-suite (`kapi eval`). Its defining constraint: **a single runtime dependency (`yaml`)** and
-a native `node:http` server — a deliberately tiny attack surface. Localhost-only by
-default; prompt/response bodies are never written to disk. Requires Node ≥ 20.
+model masking (streaming included), constant-time key auth, **PII redaction** (TCKN/phone/
+email/IBAN scrubbed before content leaves to external providers), **per-key model scoping**,
+a metadata-only **audit log**, and a built-in, judge-free Turkish evaluation suite
+(`kapi eval`). Its defining constraint: **a single runtime dependency (`yaml`)** and a
+native `node:http` server — a deliberately tiny attack surface. Localhost-only by default;
+prompt/response bodies are never written to disk. Requires Node ≥ 20.
 
 ```bash
 git clone https://github.com/yeneryigitcelik-debug/kapi.git

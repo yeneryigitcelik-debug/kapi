@@ -4,7 +4,7 @@ import { parseArgs } from '../src/util/args.js';
 import log, { bold, cyan, dim } from '../src/util/log.js';
 import { ConfigError } from '../src/core/config.js';
 
-const VERSION = '0.1.0';
+const VERSION = '0.2.0';
 
 function printHelp() {
   const b = bold;

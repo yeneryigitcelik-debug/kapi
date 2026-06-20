@@ -2,6 +2,7 @@
 import http from 'node:http';
 import { route } from './router.js';
 import { makeAuth } from '../middleware/auth.js';
+import { makeAudit } from '../security/audit.js';
 import { indexModels } from './config.js';
 
 const MAX_BODY = 10 * 1024 * 1024; // 10 MB
@@ -67,6 +68,7 @@ function readBody(req, max) {
 export function createGateway(cfg) {
   const modelIndex = indexModels(cfg);
   const checkAuth = makeAuth(cfg);
+  const audit = makeAudit(cfg);
   const logBodies = cfg?.security?.log_bodies === true;
   const log = cfg?.__log ?? NOOP_LOG;
 
@@ -101,17 +103,17 @@ export function createGateway(cfg) {
     }
 
     // Takma adları listele — gerçek model adı/api_base sızdırma.
+    // Scope'lu anahtar yalnız kendi modellerini görür.
     if (req.method === 'GET' && pathname === '/v1/models') {
-      const data = [...modelIndex.values()].map((m) => ({
-        id: m.name,
-        object: 'model',
-        owned_by: m.provider,
-      }));
+      const data = [...modelIndex.values()]
+        .filter((m) => !auth.models || auth.models.includes(m.name))
+        .map((m) => ({ id: m.name, object: 'model', owned_by: m.provider }));
       sendJson(res, 200, { object: 'list', data });
       return;
     }
 
     if (req.method === 'POST' && pathname === '/v1/chat/completions') {
+      const t0 = Date.now();
       let raw;
       try {
         raw = await readBody(req, MAX_BODY);
@@ -135,8 +137,9 @@ export function createGateway(cfg) {
       // KVKK: içerik yalnızca log_bodies açıkça açıkken loglanır.
       if (logBodies) log.info(`POST /v1/chat/completions ← ${raw}`);
 
+      const ctx = { keyId: auth.keyId ?? null };
       try {
-        await route({ body, cfg, modelIndex, res, log });
+        await route({ body, cfg, modelIndex, res, log, ctx, allowedModels: auth.models });
       } catch (err) {
         const status = Number.isInteger(err?.status) ? err.status : 500;
         if (!res.headersSent) {
@@ -147,6 +150,21 @@ export function createGateway(cfg) {
           } catch {}
         }
       }
+
+      // Denetim günlüğü: SADECE metadata — prompt/yanıt içeriği asla yazılmaz.
+      audit({
+        ts: new Date().toISOString(),
+        ip: req.socket?.remoteAddress ?? null,
+        key: ctx.keyId,
+        model: typeof body?.model === 'string' ? body.model : null,
+        resolved: ctx.resolved ?? null,
+        provider: ctx.provider ?? null,
+        status: res.statusCode,
+        ms: Date.now() - t0,
+        fallback: ctx.fallback ?? false,
+        stream: body?.stream === true,
+        ...(ctx.redacted ? { redacted: ctx.redacted } : {}),
+      });
       return;
     }
 

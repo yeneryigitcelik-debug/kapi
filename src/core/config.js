@@ -12,7 +12,7 @@ export class ConfigError extends Error {
 
 export const DEFAULTS = {
   server: { host: '127.0.0.1', port: 4100 },
-  security: { require_key: false, keys: [], log_bodies: false },
+  security: { require_key: false, keys: [], log_bodies: false, redact_pii: false, pii: [], audit_log: null },
   routing: { fallbacks: {}, timeout_ms: 120000 },
   models: [],
 };
@@ -99,6 +99,43 @@ function validate(cfg) {
     if (!Array.isArray(keys) || keys.length === 0) {
       throw new ConfigError('security.require_key:true iken security.keys boş olamaz.');
     }
+  }
+
+  // Anahtarlar: "düz-string" veya { key, models? }. Scope tanımlı modellere işaret etmeli.
+  const keys = cfg.security?.keys ?? [];
+  if (!Array.isArray(keys)) {
+    throw new ConfigError('security.keys bir dizi olmalı.');
+  }
+  keys.forEach((k, i) => {
+    if (typeof k === 'string') return;
+    if (!isPlainObject(k) || typeof k.key !== 'string' || k.key.length === 0) {
+      throw new ConfigError(`security.keys[${i}] ya bir string ya da { key, models } nesnesi olmalı.`);
+    }
+    if (k.models !== undefined) {
+      if (!Array.isArray(k.models)) {
+        throw new ConfigError(`security.keys[${i}].models bir dizi olmalı.`);
+      }
+      for (const m of k.models) {
+        if (!names.has(m)) {
+          throw new ConfigError(`security.keys[${i}].models tanımsız modele işaret ediyor: '${m}'.`);
+        }
+      }
+    }
+  });
+
+  // PII redaksiyon alanları.
+  if (cfg.security?.redact_pii !== undefined && typeof cfg.security.redact_pii !== 'boolean') {
+    throw new ConfigError('security.redact_pii boolean olmalı.');
+  }
+  if (cfg.security?.pii !== undefined && !Array.isArray(cfg.security.pii)) {
+    throw new ConfigError('security.pii bir dizi olmalı (örn. [tckn, telefon, email, iban]).');
+  }
+  if (
+    cfg.security?.audit_log !== undefined &&
+    cfg.security.audit_log !== null &&
+    typeof cfg.security.audit_log !== 'string'
+  ) {
+    throw new ConfigError('security.audit_log bir dosya yolu (string) ya da null olmalı.');
   }
 }
 
