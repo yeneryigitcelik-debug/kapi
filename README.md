@@ -4,7 +4,7 @@
 
 **Güvenlik öncelikli, KVKK-first yerel LLM gateway.**
 
-Ollama ve OpenAI-uyumlu sağlayıcıları tek bir uçta toplar, model çökerse otomatik yedeğe geçer, modelleri Türkçe görevlerle değerlendirir — ve bunu **tek bağımlılıkla** yapar.
+Ollama, Anthropic ve OpenAI-uyumlu sağlayıcıları tek bir uçta toplar, model çökerse otomatik yedeğe geçer, modelleri Türkçe görevlerle değerlendirir — ve bunu **tek bağımlılıkla** yapar.
 
 [![ci](https://github.com/yeneryigitcelik-debug/kapi/actions/workflows/ci.yml/badge.svg)](https://github.com/yeneryigitcelik-debug/kapi/actions/workflows/ci.yml)
 [![Lisans: MIT](https://img.shields.io/badge/lisans-MIT-blue.svg)](./LICENSE)
@@ -47,7 +47,7 @@ Ollama ve OpenAI-uyumlu sağlayıcıları tek bir uçta toplar, model çökerse 
 ## kapı nedir?
 
 `kapı`, kendi makinende veya sunucunda çalışan bir **LLM ağ geçidi**dir. Önüne bir
-OpenAI-uyumlu uç koyar; arkasına Ollama, DeepSeek, vLLM, OpenRouter gibi sağlayıcıları
+OpenAI-uyumlu uç koyar; arkasına Ollama, Anthropic (Claude), DeepSeek, vLLM, OpenRouter gibi sağlayıcıları
 dizersin. İstemcin tek bir takma ad (`yerel-hizli`) görür — gerçek model adı, `api_base`
 ve anahtarlar gateway'in arkasında kalır.
 
@@ -214,6 +214,9 @@ models:
     api_key: ${DEEPSEEK_API_KEY}    # eksikse kapı net hata verir, sessiz geçmez
 ```
 
+**Sağlayıcılar:** `ollama`, `openai-compatible` (DeepSeek/vLLM/OpenRouter/Together…) ve
+`anthropic` (Claude — OpenAI ↔ Messages çevirisini, `max_tokens` ve stream dahil, kapı üstlenir).
+
 **Doğrulama dahili.** En az bir model zorunludur; `name`/`provider`/`model` alanları
 gerekli; isimler benzersiz olmalı; her fallback tanımlı bir modele işaret etmeli;
 `require_key: true` ise `keys` boş olamaz. Hatalı config → tek satırlık, Türkçe, net hata.
@@ -311,7 +314,9 @@ src/
   core/config.js         YAML yükle + ${ENV} enjekte + doğrula
   core/router.js         model çöz + fallback + PII redaksiyon + stream maskeleme
   core/server.js         native http, OpenAI-uyumlu uçlar, audit
-  providers/index.js     ollama + openai-compatible adaptörleri
+  providers/index.js     kayıt defteri: ollama · openai-compatible · anthropic
+  providers/base.js      paylaşılan ProviderError + timeout'lu fetch
+  providers/anthropic.js Anthropic Messages API çevirisi (OpenAI ↔ Claude)
   middleware/auth.js     sabit zamanlı anahtar kontrolü + per-key scope
   security/pii.js        PII dedektörleri (TCKN/IBAN doğrulamalı) + redaksiyon
   security/audit.js      metadata-only denetim günlüğü (JSONL)
@@ -333,14 +338,14 @@ yazılır, geçici hatada sıradaki modele geçilir → sonda yalnız metadata `
 ## Geliştirme ve test
 
 ```bash
-node test-e2e.js     # PII birim + uçtan uca — 32 assertion, hepsi geçmeli
+node test-e2e.js     # birim + uçtan uca — 46 assertion, hepsi geçmeli
 npm test             # = yukarısı
 npm ls --all         # yalnızca yaml@2 görünmeli — projenin konumlama iddiası
 ```
 
-Test, gerçek model gerektirmez: PII dedektörlerinin birim testleri + üç sahte upstream
-(OK / hep-500 / SSE-stream) ile auth, maskeleme, fallback, hata yolları, streaming,
-PII redaksiyonu, per-key scope ve audit logunu doğrular.
+Test, gerçek model gerektirmez: PII + Anthropic çeviri birim testleri + dört sahte upstream
+(OK / hep-500 / SSE / Anthropic) ile auth, maskeleme, fallback, hata yolları, streaming,
+PII redaksiyonu, per-key scope, audit logu ve Anthropic OpenAI↔Messages çevirisini doğrular.
 
 **CI:** GitHub Actions her push/PR'da test matrisini (Node 20/22/24) + tek-bağımlılık
 güvencesini + Docker build'i koşar.
@@ -349,8 +354,8 @@ güvencesini + Docker build'i koşar.
 
 ## Yol haritası
 
+- [x] **0.3.0** — Anthropic native sağlayıcı (OpenAI ↔ Messages çevirisi, stream dahil)
 - [x] **0.2.0** — PII redaksiyonu, per-key model scope, denetim günlüğü, stream model maskeleme
-- [ ] Anthropic native sağlayıcı
 - [ ] Model-bazlı rate limit
 - [ ] `eval --export json` (CI regresyon takibi)
 - [ ] Prometheus `/metrics` (sayaç — içerik değil)
@@ -377,7 +382,7 @@ satırında.
 <summary>🇬🇧 English summary</summary>
 
 **kapı** is a security-first, privacy-by-default local LLM gateway. It puts a single
-OpenAI-compatible endpoint in front of Ollama and OpenAI-compatible providers (DeepSeek,
+OpenAI-compatible endpoint in front of Ollama, Anthropic, and OpenAI-compatible providers (DeepSeek,
 vLLM, OpenRouter), with automatic fallback on `5xx/429/network` errors, response-side
 model masking (streaming included), constant-time key auth, **PII redaction** (TCKN/phone/
 email/IBAN scrubbed before content leaves to external providers), **per-key model scoping**,

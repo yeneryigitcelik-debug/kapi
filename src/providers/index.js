@@ -1,40 +1,14 @@
-// Sağlayıcı adaptörleri. Her biri chat(modelCfg, body, {timeoutMs}) → ham fetch Response.
-// Stream/JSON'u çağıran (router) işler.
+// Sağlayıcı kayıt defteri. Her adaptör chat(modelCfg, body, {timeoutMs}) → OpenAI-formatlı
+// fetch Response döndürür (router provider-agnostik kalır; çeviri sağlayıcının işi).
+import { ProviderError, trimSlash, fetchWithTimeout } from './base.js';
+import { anthropic } from './anthropic.js';
 
-export class ProviderError extends Error {
-  constructor(message, status) {
-    super(message);
-    this.name = 'ProviderError';
-    this.status = status; // 5xx/429/network → fallback; 4xx (≠429) → hemen hata.
-  }
-}
-
-async function fetchWithTimeout(url, opts, timeoutMs) {
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
-  try {
-    return await fetch(url, { ...opts, signal: ctrl.signal });
-  } catch (e) {
-    if (e?.name === 'AbortError') {
-      throw new ProviderError(`Üst sunucu zaman aşımı (${timeoutMs}ms).`, 504);
-    }
-    // Ağ hatası: status yok → router bunu yedeklenebilir sayar.
-    const err = new ProviderError(`Üst sunucuya ulaşılamadı: ${e?.message ?? e}`, undefined);
-    err.cause = e;
-    throw err;
-  } finally {
-    clearTimeout(timer);
-  }
-}
+export { ProviderError };
 
 function buildHeaders(modelCfg) {
   const headers = { 'Content-Type': 'application/json', ...(modelCfg.headers || {}) };
   if (modelCfg.api_key) headers['Authorization'] = `Bearer ${modelCfg.api_key}`;
   return headers;
-}
-
-function trimSlash(s) {
-  return String(s || '').replace(/\/+$/, '');
 }
 
 const openaiCompatible = {
@@ -52,10 +26,7 @@ const openaiCompatible = {
       timeoutMs
     );
     if (!res.ok) {
-      throw new ProviderError(
-        `Sağlayıcı hatası (${res.status}) — model '${modelCfg.name}'.`,
-        res.status
-      );
+      throw new ProviderError(`Sağlayıcı hatası (${res.status}) — model '${modelCfg.name}'.`, res.status);
     }
     return res;
   },
@@ -86,6 +57,7 @@ const ollama = {
 const REGISTRY = {
   'openai-compatible': openaiCompatible,
   ollama,
+  anthropic,
 };
 
 export function getProvider(name) {

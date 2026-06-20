@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createGateway } from './src/core/server.js';
 import { isValidTCKN, isValidIBAN_TR, redactText } from './src/security/pii.js';
+import { toAnthropicRequest, toOpenAIResponse } from './src/providers/anthropic.js';
 
 let passed = 0;
 let failed = 0;
@@ -71,6 +72,52 @@ const streamServer = http.createServer((req, res) => {
   });
 });
 
+// --- Sahte upstream 4: Anthropic Messages API (header + max_tokens katı). ---
+const anthropicServer = http.createServer((req, res) => {
+  let body = '';
+  req.on('data', (c) => (body += c));
+  req.on('end', () => {
+    if (req.headers['x-api-key'] !== 'anthropic-test-key' || !req.headers['anthropic-version']) {
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ type: 'error', error: { message: 'auth' } }));
+      return;
+    }
+    let p = {};
+    try {
+      p = JSON.parse(body || '{}');
+    } catch {}
+    if (typeof p.max_tokens !== 'number') {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ type: 'error', error: { message: 'max_tokens gerekli' } }));
+      return;
+    }
+    // Aldıklarını metne yansıt → çeviriyi (model adı, system, max_tokens) doğrulamak için.
+    const echo = `model=${p.model};system=${p.system || ''};mt=${p.max_tokens}`;
+    if (p.stream) {
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+      res.write('event: message_start\ndata: {"type":"message_start","message":{"model":"' + p.model + '"}}\n\n');
+      res.write('event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Mer"}}\n\n');
+      res.write('event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"haba"}}\n\n');
+      res.write('event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"}}\n\n');
+      res.write('event: message_stop\ndata: {"type":"message_stop"}\n\n');
+      res.end();
+    } else {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          id: 'msg_1',
+          type: 'message',
+          role: 'assistant',
+          model: p.model,
+          content: [{ type: 'text', text: echo }],
+          stop_reason: 'end_turn',
+          usage: { input_tokens: 5, output_tokens: 3 },
+        })
+      );
+    }
+  });
+});
+
 async function main() {
   // ============ PII birim testleri (sunucusuz) ============
   console.log('\nkapı — PII birim testleri\n');
@@ -84,13 +131,31 @@ async function main() {
     assert(r.text.includes('[E-POSTA]') && !r.text.includes('ahmet@example.com'), 'redact: e-posta maskelendi');
   }
 
+  console.log('\nkapı — Anthropic çeviri birim testleri\n');
+  {
+    const areq = toAnthropicRequest(
+      { messages: [{ role: 'system', content: 'Sen yardımcısın' }, { role: 'user', content: 'selam' }] },
+      { model: 'claude-x' }
+    );
+    assert(areq.system === 'Sen yardımcısın' && areq.messages.length === 1, 'anthropic: system mesajı üst seviyeye taşındı');
+    assert(typeof areq.max_tokens === 'number' && areq.max_tokens > 0, 'anthropic: max_tokens varsayılanı eklendi');
+    const oai = toOpenAIResponse(
+      { id: 'm1', content: [{ type: 'text', text: 'cevap' }], stop_reason: 'end_turn', usage: { input_tokens: 7, output_tokens: 2 } },
+      'claude-x'
+    );
+    assert(oai.choices[0].message.content === 'cevap' && oai.object === 'chat.completion', 'anthropic: yanıt OpenAI şekline çevrildi');
+    assert(oai.usage.prompt_tokens === 7 && oai.usage.total_tokens === 9, 'anthropic: usage çevrildi');
+  }
+
   // ============ Gateway e2e ============
   const okPort = await listen(okServer);
   const badPort = await listen(badServer);
   const streamPort = await listen(streamServer);
+  const anthropicPort = await listen(anthropicServer);
   const okBase = `http://127.0.0.1:${okPort}`;
   const badBase = `http://127.0.0.1:${badPort}`;
   const streamBase = `http://127.0.0.1:${streamPort}`;
+  const anthropicBase = `http://127.0.0.1:${anthropicPort}`;
 
   const KEY = 'gizli-anahtar';
   const SCOPED = 'scoped-anahtar';
@@ -114,6 +179,7 @@ async function main() {
       { name: 'bozuk-yalniz', provider: 'openai-compatible', model: 'gercek-bozuk-2', api_base: badBase },
       { name: 'akan', provider: 'openai-compatible', model: 'gercek-akan', api_base: streamBase },
       { name: 'yerel-ollama', provider: 'ollama', model: 'qwen-yerel', api_base: okBase }, // yerel → maskeleme YOK
+      { name: 'claude', provider: 'anthropic', model: 'claude-gercek', api_base: anthropicBase, api_key: 'anthropic-test-key', max_tokens: 256 },
     ],
   };
 
@@ -148,7 +214,7 @@ async function main() {
   const health = await fetch(`${base}/health`);
   const healthJson = await health.json();
   assert(health.status === 200 && healthJson.status === 'ok', "/health auth'suz → 200 ok");
-  assert(healthJson.models === 6, '/health doğru model sayısını bildirir (6)');
+  assert(healthJson.models === 7, '/health doğru model sayısını bildirir (7)');
 
   // --- FALLBACK + HATA ---
   const fb = await chat('bozuk', { key: KEY });
@@ -164,6 +230,29 @@ async function main() {
   assert(stext.includes('Mer') && stext.includes('haba'), 'stream: parçalar aktarıldı (Merhaba)');
   assert(stext.includes('[DONE]'), 'stream: [DONE] ile bitti');
   assert(stext.includes('"model":"akan"') && !stext.includes('gercek-akan'), 'stream: model alanı da maskelendi');
+
+  // --- Anthropic native provider (OpenAI ↔ Messages çevirisi) ---
+  const an = await chat('claude', { key: KEY });
+  assert(an.status === 200, 'anthropic: non-stream → 200');
+  const anJson = await an.json();
+  assert(anJson.model === 'claude', 'anthropic: yanıt takma ada maskelendi');
+  assert((anJson.choices?.[0]?.message?.content || '').includes('model=claude-gercek'), "anthropic: gerçek model adı upstream'e çevrildi");
+  assert((anJson.choices?.[0]?.message?.content || '').includes('mt=256'), 'anthropic: max_tokens eklendi (Messages API zorunlu)');
+  assert(anJson.usage?.prompt_tokens === 5, 'anthropic: usage OpenAI şekline çevrildi');
+
+  const anSys = await fetch(`${base}/v1/chat/completions`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${KEY}` },
+    body: JSON.stringify({ model: 'claude', messages: [{ role: 'system', content: 'Sistem-X' }, { role: 'user', content: 'selam' }] }),
+  });
+  assert(((await anSys.json()).choices?.[0]?.message?.content || '').includes('system=Sistem-X'), 'anthropic: system mesajı Messages system alanına çevrildi');
+
+  const anStream = await chat('claude', { key: KEY, stream: true });
+  assert((anStream.headers.get('content-type') || '').includes('text/event-stream'), 'anthropic stream: content-type event-stream');
+  const anStreamText = await anStream.text();
+  assert(anStreamText.includes('Mer') && anStreamText.includes('haba'), 'anthropic stream: Anthropic SSE → OpenAI delta çevrildi');
+  assert(anStreamText.includes('[DONE]'), 'anthropic stream: [DONE] üretildi');
+  assert(anStreamText.includes('"model":"claude"') && !anStreamText.includes('claude-gercek'), 'anthropic stream: model maskelendi');
 
   // --- PII redaksiyonu ---
   const PII = 'Müşteri TC 10000000146, tel 0532 123 45 67, mail ahmet@example.com, IBAN TR33 0006 1005 1978 6457 8413 26';
@@ -208,6 +297,7 @@ async function main() {
     new Promise((r) => okServer.close(r)),
     new Promise((r) => badServer.close(r)),
     new Promise((r) => streamServer.close(r)),
+    new Promise((r) => anthropicServer.close(r)),
   ]);
   process.exit(failed === 0 ? 0 : 1);
 }

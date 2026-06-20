@@ -58,6 +58,13 @@ models:
     api_base: https://api.deepseek.com
     model: deepseek-chat
     api_key: \${DEEPSEEK_API_KEY}
+
+  # Anthropic (Claude) — native; OpenAI ↔ Messages çevirisini kapı yapar (ANTHROPIC_API_KEY ister).
+  # - name: claude
+  #   provider: anthropic
+  #   model: claude-sonnet-4-6
+  #   api_key: \${ANTHROPIC_API_KEY}
+  #   max_tokens: 4096
 `;
 }
 
