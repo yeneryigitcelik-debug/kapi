@@ -1,0 +1,38 @@
+# kapı örnek yapılandırması — kopyalayıp kapi.yaml yap, kendi modellerine göre düzenle.
+# Güvenlik:
+#   * Sadece 127.0.0.1 dinle. Dışa açacaksan require_key:true + güvenlik duvarı.
+#   * API anahtarlarını DÜZ METİN yazma; ${ENV_DEGISKEN} ile enjekte et.
+#   * log_bodies'i prod'da açma (KVKK: prompt/yanıt içeriği diske yazılır).
+
+server:
+  host: 127.0.0.1
+  port: 4100
+
+security:
+  require_key: false
+  keys: []
+  # keys:
+  #   - ${KAPI_KEY}
+  log_bodies: false
+
+routing:
+  timeout_ms: 120000
+  fallbacks:
+    yerel-hizli: [deepseek, yerel-buyuk]
+
+models:
+  - name: yerel-hizli
+    provider: ollama
+    model: qwen2.5:7b
+
+  - name: yerel-buyuk
+    provider: ollama
+    model: qwen2.5:32b
+
+  # DEEPSEEK_API_KEY ortam değişkeni ister; kullanmıyorsan bu modeli ve
+  # fallbacks'teki 'deepseek' referansını sil.
+  - name: deepseek
+    provider: openai-compatible
+    api_base: https://api.deepseek.com
+    model: deepseek-chat
+    api_key: ${DEEPSEEK_API_KEY}

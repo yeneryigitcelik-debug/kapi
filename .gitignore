@@ -1,0 +1,16 @@
+node_modules/
+npm-debug.log*
+
+# Kullanıcı yapılandırması — gerçek anahtarlar/uçlar içerebilir, repoya girmez.
+kapi.yaml
+kapi.yml
+.kapi.yaml
+.env
+.env.*
+
+# Eval çıktıları / geçici dosyalar
+*.log
+.DS_Store
+
+# İç build dökümanı — public repoya girmesin (istersen: git add -f kapi-build-brief.md)
+kapi-build-brief.md
