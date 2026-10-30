@@ -23,7 +23,7 @@ jobs:
       - name: Tek bağımlılık güvencesi (yalnız yaml)
         run: |
           node -e "const d=require('./package.json').dependencies||{};const n=Object.keys(d);if(n.length!==1||n[0]!=='yaml'){console.error('Beklenen tek dep: yaml — bulunan:',n);process.exit(1)}"
-      - run: node test-e2e.js
+      - run: npm test
 
   docker:
     name: docker build

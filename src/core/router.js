@@ -1,6 +1,7 @@
 // Yönlendirme: scope → model çöz → fallback zinciri → (gerekirse) PII maskele →
-// stream/JSON passthrough (+ stream'de model maskeleme).
-import { getProvider } from '../providers/index.js';
+// commit öncesi tam JSON / ilk SSE olayı → istemciye aktar (+ model maskeleme).
+import { getProvider, ProviderError } from '../providers/index.js';
+import { readJsonBody } from '../providers/base.js';
 import { resolveTypes, redactMessages } from '../security/pii.js';
 
 function httpError(status, message) {
@@ -9,7 +10,6 @@ function httpError(status, message) {
   return err;
 }
 
-// Deneme sırası = [istenen, ...fallbacks[istenen]] (dedup + yalnız tanımlı modeller).
 function buildChain(requested, fallbacks, modelIndex) {
   const chain = [requested];
   for (const f of fallbacks?.[requested] ?? []) {
@@ -18,7 +18,7 @@ function buildChain(requested, fallbacks, modelIndex) {
   return chain;
 }
 
-// 5xx / 429 / ağ (status yok) → yedeğe geç. 4xx (≠429) → hemen fırlat.
+// 5xx / 429 / ağ (status yok) → yedeğe geç. 4xx (≠429, 499 dahil) → hemen fırlat.
 function isRetryable(status) {
   if (status === undefined || status === null) return true;
   if (status === 429) return true;
@@ -30,50 +30,116 @@ const STREAM_HEADERS = {
   'Cache-Control': 'no-cache',
   Connection: 'keep-alive',
 };
+const FINISH = new Set(['stop', 'length', 'tool_calls', 'content_filter', 'function_call']);
+const STREAM_CODES = new Set(['upstream_stream_error', 'upstream_stream_truncated']);
 
-// Tek bir SSE satırında `model` alanını takma adla değiştir (maskeleme sızıntısını kapat).
-function maskSseLine(line, alias) {
-  const m = /^(data:\s*)(.*)$/.exec(line);
-  if (!m) return line;
-  const payload = m[2];
-  if (payload === '[DONE]' || payload.trim() === '') return line;
-  try {
-    const obj = JSON.parse(payload);
-    if (obj && typeof obj === 'object' && 'model' in obj) {
-      obj.model = alias;
-      return m[1] + JSON.stringify(obj);
+// Çerçeve-farkında SSE okuyucu: maskelenmiş OpenAI olaylarını tek tek verir.
+// Geçerli sonlandırıcı: [DONE] ya da finish_reason. Yoksa/upstream hata çerçevesi → ProviderError.
+function sseEvents(body, alias) {
+  const reader = body.getReader();
+  const dec = new TextDecoder();
+  const queue = [];
+  let buf = '';
+  let done = false;
+  let sawDone = false;
+  let sawFinish = false;
+
+  const handle = (block) => {
+    const other = [];
+    const data = [];
+    for (const line of block.split('\n')) {
+      if (line.startsWith('data:')) data.push(line.slice(5).replace(/^ /, ''));
+      else if (line && !line.startsWith(':')) other.push(line);
     }
-  } catch {
-    /* JSON değilse olduğu gibi geç */
-  }
-  return line;
+    if (!data.length) return;
+    const payload = data.join('\n');
+    if (payload.trim() === '[DONE]') {
+      sawDone = true;
+      queue.push('data: [DONE]');
+      return;
+    }
+    let obj = null;
+    try {
+      obj = JSON.parse(payload);
+    } catch {
+      obj = null;
+    }
+    if (!obj || typeof obj !== 'object' || Array.isArray(obj) || obj.error) {
+      throw new ProviderError('Üst sunucu akış hatası.', 502, 'upstream_stream_error');
+    }
+    if ('model' in obj) obj.model = alias;
+    if (Array.isArray(obj.choices) && obj.choices.some((c) => FINISH.has(c?.finish_reason))) sawFinish = true;
+    queue.push([...other, 'data: ' + JSON.stringify(obj)].join('\n'));
+  };
+
+  return {
+    async next() {
+      for (;;) {
+        if (queue.length) return queue.shift();
+        if (done) return null;
+        let r;
+        try {
+          r = await reader.read();
+        } catch (e) {
+          throw e instanceof ProviderError ? e : new ProviderError('Üst sunucu akış hatası.', 502, 'upstream_stream_error');
+        }
+        buf += r.done ? dec.decode() : dec.decode(r.value, { stream: true });
+        buf = buf.replace(/\r\n/g, '\n').replace(/\r(?=[^\n])/g, '\n');
+        let i;
+        while (!sawDone && (i = buf.indexOf('\n\n')) !== -1) {
+          const block = buf.slice(0, i);
+          buf = buf.slice(i + 2);
+          handle(block);
+        }
+        if (sawDone) {
+          done = true;
+          reader.cancel().catch(() => {});
+          continue;
+        }
+        if (r.done) {
+          if (buf.replace(/\r/g, '').trim()) handle(buf.replace(/\r/g, ''));
+          buf = '';
+          done = true;
+          if (!sawDone && !sawFinish) {
+            queue.length = 0;
+            if (!queue.length && !sawFinish) {
+              throw new ProviderError('Üst sunucu akışı erken kapandı.', 502, 'upstream_stream_truncated');
+            }
+          }
+        }
+      }
+    },
+    cancel() {
+      reader.cancel().catch(() => {});
+    },
+  };
 }
 
-// Web ReadableStream'i satır satır okuyup maskeleyerek Node res'e aktar.
-// Başlık yazıldıktan sonra fallback yok.
-async function pipeMaskedStream(webBody, res, alias) {
-  res.writeHead(200, STREAM_HEADERS);
-  if (!webBody) {
-    res.end();
-    return;
-  }
-  const reader = webBody.getReader();
-  const decoder = new TextDecoder();
-  let buffer = '';
-  for (;;) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    let idx;
-    while ((idx = buffer.indexOf('\n')) !== -1) {
-      const line = buffer.slice(0, idx);
-      buffer = buffer.slice(idx + 1);
-      res.write(maskSseLine(line, alias) + '\n');
-    }
-  }
-  buffer += decoder.decode();
-  if (buffer) res.write(maskSseLine(buffer, alias));
-  res.end();
+// drain / close / istemci iptali → resolve; deneme başına mutlak deadline → 504 reject.
+function waitDrain(res, signal, deadlineAt) {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted || res.destroyed || res.writableEnded) return resolve();
+    const remaining = deadlineAt - Date.now();
+    if (!(remaining > 0)) return reject(new ProviderError('Üst sunucu zaman aşımı.', 504));
+    let timer = null;
+    const cleanup = () => {
+      clearTimeout(timer);
+      res.off('drain', fin);
+      res.off('close', fin);
+      signal.removeEventListener('abort', fin);
+    };
+    const fin = () => {
+      cleanup();
+      resolve();
+    };
+    timer = setTimeout(() => {
+      cleanup();
+      reject(new ProviderError('Üst sunucu zaman aşımı.', 504));
+    }, remaining);
+    res.on('drain', fin);
+    res.on('close', fin);
+    signal.addEventListener('abort', fin);
+  });
 }
 
 export async function route({ body, cfg, modelIndex, res, log, ctx = {}, allowedModels = null }) {
@@ -84,68 +150,133 @@ export async function route({ body, cfg, modelIndex, res, log, ctx = {}, allowed
   if (!modelIndex.has(requested)) {
     throw httpError(400, `Bilinmeyen model: '${requested}'.`);
   }
-  // Per-key scope: anahtar bu modele yetkili mi?
   if (allowedModels && !allowedModels.includes(requested)) {
     throw httpError(403, `Bu anahtar '${requested}' modeline yetkili değil.`);
   }
 
   let chain = buildChain(requested, cfg.routing?.fallbacks, modelIndex);
-  // Scope, fallback zincirinden de kaçışı engeller.
   if (allowedModels) chain = chain.filter((m) => allowedModels.includes(m));
 
   const timeoutMs = cfg.routing?.timeout_ms ?? 120000;
   const wantStream = body?.stream === true;
 
-  let lastErr;
-  let attempts = 0;
-  for (const name of chain) {
-    attempts++;
-    const modelCfg = modelIndex.get(name);
-    const provider = getProvider(modelCfg.provider);
-
-    // PII redaksiyonu: yalnız dış sağlayıcıya giden gövde maskelenir (orijinali değişmez).
-    const types = resolveTypes(cfg, modelCfg);
-    let sendBody = body;
-    let redacted = {};
-    if (types) {
-      const r = redactMessages(body.messages, types);
-      sendBody = { ...body, messages: r.messages };
-      redacted = r.counts;
+  // İstemci kopması (yanıt bitmeden) → mevcut deneme iptal, fallback yok.
+  const ac = new AbortController();
+  const onClose = () => {
+    if (!res.writableFinished) {
+      ctx.clientAborted = true;
+      ac.abort();
     }
+  };
+  res.on('close', onClose);
+  if (res.destroyed || res.socket?.destroyed) onClose();
 
-    let upstream;
-    try {
-      upstream = await provider.chat(modelCfg, sendBody, { timeoutMs });
-    } catch (err) {
-      lastErr = err;
-      if (!isRetryable(err?.status)) throw err;
-      log?.warn?.(`model '${name}' başarısız (${err?.status ?? 'ağ'}); zincirde sıradaki deneniyor.`);
-      continue;
-    }
+  try {
+    let lastErr;
+    let attempts = 0;
+    for (const name of chain) {
+      if (ac.signal.aborted) break;
+      attempts++;
+      const modelCfg = modelIndex.get(name);
+      const provider = getProvider(modelCfg.provider);
 
-    // Upstream OK — bu yanıta bağlandık. Audit bağlamını doldur.
-    ctx.resolved = name;
-    ctx.provider = modelCfg.provider;
-    ctx.fallback = name !== requested;
-    ctx.attempts = attempts;
-    if (Object.keys(redacted).length) ctx.redacted = redacted;
+      const types = resolveTypes(cfg, modelCfg);
+      let sendBody = body;
+      let redacted = {};
+      if (types) {
+        const r = redactMessages(body.messages, types);
+        sendBody = { ...body, messages: r.messages };
+        redacted = r.counts;
+      }
 
-    if (wantStream) {
-      await pipeMaskedStream(upstream.body, res, requested);
+      const deadlineAt = Date.now() + timeoutMs;
+      let upstream;
+      let events;
+      let first;
+      let json;
+      try {
+        upstream = await provider.chat(modelCfg, sendBody, { timeoutMs, signal: ac.signal });
+        if (wantStream) {
+          if (!upstream.body) throw new ProviderError('Üst sunucu akışı boş.', 502, 'upstream_stream_truncated');
+          events = sseEvents(upstream.body, requested);
+          first = await events.next(); // commit öncesi ilk olay
+        } else {
+          json = await readJsonBody(upstream);
+          upstream.cancelUpstream?.();
+          if (!json || typeof json !== 'object' || json.error || !Array.isArray(json.choices)) {
+            throw new ProviderError('Üst sunucu geçersiz yanıt döndürdü.', 502, 'upstream_invalid_response');
+          }
+        }
+      } catch (err) {
+        events?.cancel();
+        upstream?.cancelUpstream?.();
+        if (ac.signal.aborted) break;
+        lastErr = err;
+        if (err?.hint) log?.warn?.(`model '${name}': ${err.hint}`);
+        if (!isRetryable(err?.status)) throw err;
+        log?.warn?.(`model '${name}' başarısız (${err?.status ?? 'ağ'}); zincirde sıradaki deneniyor.`);
+        continue;
+      }
+
+      if (ac.signal.aborted) {
+        events?.cancel();
+        upstream?.cancelUpstream?.();
+        break;
+      }
+
+      ctx.resolved = name;
+      ctx.provider = modelCfg.provider;
+      ctx.fallback = name !== requested;
+      ctx.attempts = attempts;
+      if (Object.keys(redacted).length) ctx.redacted = redacted;
+
+      if (wantStream) {
+        res.writeHead(200, STREAM_HEADERS);
+        try {
+          let ev = first;
+          while (ev !== null && !ac.signal.aborted) {
+            if (!res.write(ev + '\n\n')) await waitDrain(res, ac.signal, deadlineAt);
+            if (ac.signal.aborted) break;
+            ev = await events.next();
+          }
+        } catch (err) {
+          if (!ac.signal.aborted && !res.destroyed) {
+            const timedOut = err?.status === 504;
+            const code = timedOut ? 'upstream_timeout' : STREAM_CODES.has(err?.code) ? err.code : 'upstream_stream_error';
+            ctx.streamError = code;
+            ctx.status = timedOut ? 504 : 502;
+            res.write(
+              'data: ' +
+                JSON.stringify({ error: { message: 'Üst sunucu akışı kesildi.', type: 'api_error', code } }) +
+                '\n\n'
+            );
+          }
+        } finally {
+          events.cancel();
+          upstream.cancelUpstream?.();
+          if (ac.signal.aborted) ctx.status = 499;
+          else if (!res.destroyed) res.end();
+        }
+        return;
+      }
+
+      json.model = requested; // model maskeleme
+      const payload = JSON.stringify(json);
+      res.writeHead(200, {
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(payload),
+      });
+      res.end(payload);
       return;
     }
 
-    const json = await upstream.json();
-    json.model = requested; // model maskeleme: gerçek adı istenen takma adla değiştir
-    const payload = JSON.stringify(json);
-    res.writeHead(200, {
-      'Content-Type': 'application/json',
-      'Content-Length': Buffer.byteLength(payload),
-    });
-    res.end(payload);
-    return;
+    ctx.attempts = attempts;
+    if (ac.signal.aborted) {
+      ctx.status = 499;
+      throw new ProviderError('İstemci isteği iptal etti.', 499);
+    }
+    throw lastErr ?? httpError(502, 'Tüm modeller başarısız oldu.');
+  } finally {
+    res.off('close', onClose);
   }
-
-  ctx.attempts = attempts;
-  throw lastErr ?? httpError(502, 'Tüm modeller başarısız oldu.');
 }

@@ -82,24 +82,24 @@ code, fewer dependencies, less leaked.
   supply-chain attack: the smaller a gateway's dependency tree, the fewer places it can be
   hit from. Here `npm ls --all` shows **a single package**.)
 - **🇹🇷 KVKK-first defaults.** Listens on `127.0.0.1` only. Prompt/response content is
-  **never written to disk** (`log_bodies: false`). Data stays on your server; it does not
-  take a mandatory trip abroad.
-- **🧹 PII redaction.** Before content **leaves to an external provider**, Turkish ID numbers
-  (TCKN, checksum-validated), phone numbers, e-mails, and IBANs (mod-97 validated) are
-  masked. Local `ollama` is exempt — the data never leaves the machine anyway.
-  (`redact_pii: true`)
+  **never written to disk** (`log_bodies: false`). Configuration determines where content
+  goes: use a local endpoint or send it to an external provider you choose.
+- **🧹 PII redaction.** With `redact_pii: true`, text matches for Turkish ID numbers
+  (TCKN, checksum-validated), phone numbers, e-mails, and TR IBANs (mod-97 validated)
+  are masked before sending. Only loopback Ollama endpoints are automatically exempt;
+  remote Ollama is masked too.
 - **🪪 Per-key model scope.** A key sees and can call only the models assigned to it; even
   the fallback chain **cannot escape** the scope (403). `/v1/models` is filtered by scope too.
 - **📋 Audit log.** Per request, only metadata (model, status, ms, fallback, how many PII
   items were masked) is appended as JSONL — **never the content.** (`audit_log`)
-- **🎭 Model masking.** The client only sees the alias. The real model name and `api_base`
-  never leak into responses — even in streaming mode the `model` field is rewritten to the alias.
+- **🎭 Model masking.** Standard `model` metadata is rewritten to the alias, including
+  streaming. Gateway-generated errors omit real model names and `api_base` values.
 - **🔑 Keys never sit in code/config as plaintext.** They are injected via `${ENV}`; if a
   variable is missing the gateway **fails loudly instead of silently running blank.**
 - **⏱ Constant-time authentication.** Keys are SHA-256 hashed and compared with
   `crypto.timingSafeEqual` — no timing leak.
 - **🔁 Smart fallback.** If a model returns `5xx/429/network` errors, the next backup is
-  tried. A `4xx` (client error) does **not** trigger fallback — the same error would just
+  tried. A `4xx` (except 429) does **not** trigger fallback — the same error would just
   repeat on another model, so no pointless retries.
 
 ---
@@ -204,7 +204,7 @@ security:
   audit_log: kapi-audit.jsonl   # request metadata (NO content)
 
 routing:
-  timeout_ms: 120000
+  timeout_ms: 120000       # total headers + full body/stream deadline for each provider attempt
   fallbacks:               # 5xx/429/network → try in order (4xx does not trigger)
     yerel-hizli: [deepseek, yerel-buyuk]
 
@@ -228,9 +228,17 @@ models:
 `anthropic` (Claude — kapı handles the OpenAI ↔ Messages translation, including `max_tokens`
 and streaming).
 
+**Deadline and stream contract.** `timeout_ms` bounds each provider attempt, including headers and the entire response body/stream. It is a total deadline, not an idle timer reset by every chunk; raise it for long generations. Disconnecting the client cancels the upstream. JSON-body or initial-stream failures may use a scoped fallback before output is committed. Once streaming starts, there is no fallback: interrupted or malformed streams end with a generic SSE error and a failed audit status. Failed Anthropic streams receive neither a fabricated `[DONE]` nor a successful finish marker.
+
+Upstream HTTP redirects are rejected; configure `api_base` with the final service address. POST bodies and private authentication headers are not forwarded to another origin.
+
+**Anthropic text bridge.** System/user/assistant text, arrays of text parts, and streaming are supported. Tools, image parts and structured output receive an explanatory `400` instead of being silently discarded. Provider policy refusals do not trigger fallback. Masking applies to standard `model` metadata and gateway-generated errors; generated response text and provider-specific data fields are not rewritten.
+
+**When redaction is enabled** (`security.redact_pii: true`), every non-Ollama provider stays masked by default. Only loopback Ollama endpoints receive the automatic local exemption; remote Ollama is masked. Per-model `redact` overrides that exemption. Use `redact: true` for a local proxy or cloud-backed Ollama model: an endpoint address does not establish where inference runs. Redaction processes configured TCKN/TR IBAN, phone, and e-mail matches in message text; it does not inspect images or tool arguments.
+
 **Validation is built in.** At least one model is required; `name`/`provider`/`model` are
 mandatory; names must be unique; every fallback must point to a defined model; if
-`require_key: true`, `keys` cannot be empty. A bad config yields a single-line, clear error
+`require_key: true`, `keys` cannot be empty. `security.pii` accepts only known types and existing aliases; an unknown or non-string entry is a configuration error. A bad config yields a single-line, clear error
 (in Turkish).
 
 ---
@@ -244,7 +252,7 @@ mandatory; names must be unique; every fallback must point to a defined model; i
 | `GET /health` · `/healthz` | — | `{ "status": "ok", "models": N }`. No auth required. |
 
 Errors come back in the OpenAI error envelope: `{ "error": { "message", "type", "code" } }`.
-CORS is open (`*`), `OPTIONS` → `204`. Request body cap is **10MB** (over it → `413`).
+CORS is open (`*`), `OPTIONS` → `204`. Request body cap is **10MB** (over it → JSON `413`); when audit logging is enabled, one metadata-only rejection entry is recorded. An upstream HTTP `200` error envelope or invalid completion shape is a pre-commit failure: an allowed backup can be tried, or the client receives a generic `502`.
 
 ---
 
@@ -342,8 +350,8 @@ test-e2e.js              end-to-end test with fake upstreams
 
 **Request flow:** `server` reads the body (≤10MB) → `auth` validates the key and resolves
 scope → `router` builds the attempt chain (`[requested, ...fallbacks]`, filtered by scope) →
-if the provider is external, **PII is masked** → `provider` calls upstream → on success the
-response (model name) is masked and written to the client, on a transient error it moves to
+when redaction is enabled and the endpoint is not exempt, **PII text is masked** → `provider` calls upstream → on success
+model metadata is masked and written to the client, on a transient error it moves to
 the next model → finally only metadata is appended to `audit_log`.
 
 ---
@@ -351,8 +359,9 @@ the next model → finally only metadata is appended to `audit_log`.
 ## Development and tests
 
 ```bash
-node test-e2e.js     # unit + end-to-end — 46 assertions, all must pass
-npm test             # = the above
+node test-e2e.js     # existing 46 unit / end-to-end checks
+node --test test-reliability.js # 12 groups / 66 network, protocol, body-limit and configuration scenarios
+npm test             # runs both suites; no real provider or key needed
 npm ls --all         # only yaml@2 should appear — the project's whole thesis
 ```
 

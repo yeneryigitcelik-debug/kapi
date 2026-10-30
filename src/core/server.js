@@ -34,7 +34,6 @@ function sendJson(res, status, obj) {
   res.end(payload);
 }
 
-// OpenAI hata zarfı: { error: { message, type, code } }.
 function sendError(res, status, message, code = null) {
   if (res.headersSent) {
     try {
@@ -48,20 +47,37 @@ function sendError(res, status, message, code = null) {
 function readBody(req, max) {
   return new Promise((resolve, reject) => {
     let size = 0;
-    const chunks = [];
-    req.on('data', (chunk) => {
+    let chunks = [];
+    let settled = false;
+    const onData = (chunk) => {
       size += chunk.length;
       if (size > max) {
-        const err = new Error('İstek gövdesi çok büyük.');
-        err.code = 'TOO_LARGE';
-        reject(err);
-        req.destroy();
+        req.off('data', onData);
+        req.off('end', onEnd);
+        chunks = [];
+        if (!settled) {
+          settled = true;
+          const err = new Error('İstek gövdesi çok büyük.');
+          err.code = 'TOO_LARGE';
+          reject(err);
+        }
+        req.resume();
         return;
       }
       chunks.push(chunk);
+    };
+    const onEnd = () => {
+      if (settled) return;
+      settled = true;
+      resolve(Buffer.concat(chunks).toString('utf8'));
+    };
+    req.on('data', onData);
+    req.on('end', onEnd);
+    req.on('error', (e) => {
+      if (settled) return;
+      settled = true;
+      reject(e);
     });
-    req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
-    req.on('error', reject);
   });
 }
 
@@ -89,21 +105,17 @@ export function createGateway(cfg) {
       return;
     }
 
-    // /health: auth'suz.
     if (req.method === 'GET' && (pathname === '/health' || pathname === '/healthz')) {
       sendJson(res, 200, { status: 'ok', models: modelIndex.size });
       return;
     }
 
-    // Geri kalan her şeyde auth.
     const auth = checkAuth(req);
     if (!auth.ok) {
       sendError(res, 401, auth.reason || 'Yetkisiz.', 'invalid_api_key');
       return;
     }
 
-    // Takma adları listele — gerçek model adı/api_base sızdırma.
-    // Scope'lu anahtar yalnız kendi modellerini görür.
     if (req.method === 'GET' && pathname === '/v1/models') {
       const data = [...modelIndex.values()]
         .filter((m) => !auth.models || auth.models.includes(m.name))
@@ -119,7 +131,20 @@ export function createGateway(cfg) {
         raw = await readBody(req, MAX_BODY);
       } catch (e) {
         if (e?.code === 'TOO_LARGE') {
+          if (!res.headersSent) res.setHeader('Connection', 'close');
           sendError(res, 413, 'İstek gövdesi çok büyük (en fazla 10MB).');
+          audit({
+            ts: new Date().toISOString(),
+            ip: req.socket?.remoteAddress ?? null,
+            key: auth.keyId ?? null,
+            model: null,
+            resolved: null,
+            provider: null,
+            status: 413,
+            ms: Date.now() - t0,
+            fallback: false,
+            stream: false,
+          });
         } else {
           sendError(res, 400, 'İstek gövdesi okunamadı.');
         }
@@ -134,7 +159,6 @@ export function createGateway(cfg) {
         return;
       }
 
-      // KVKK: içerik yalnızca log_bodies açıkça açıkken loglanır.
       if (logBodies) log.info(`POST /v1/chat/completions ← ${raw}`);
 
       const ctx = { keyId: auth.keyId ?? null };
@@ -142,7 +166,9 @@ export function createGateway(cfg) {
         await route({ body, cfg, modelIndex, res, log, ctx, allowedModels: auth.models });
       } catch (err) {
         const status = Number.isInteger(err?.status) ? err.status : 500;
-        if (!res.headersSent) {
+        if (ctx.clientAborted || res.destroyed) {
+          ctx.status = 499;
+        } else if (!res.headersSent) {
           sendError(res, status, err?.message || 'Sunucu hatası.', err?.code ?? null);
         } else {
           try {
@@ -151,7 +177,7 @@ export function createGateway(cfg) {
         }
       }
 
-      // Denetim günlüğü: SADECE metadata — prompt/yanıt içeriği asla yazılmaz.
+      // Denetim günlüğü: SADECE metadata.
       audit({
         ts: new Date().toISOString(),
         ip: req.socket?.remoteAddress ?? null,
@@ -159,10 +185,11 @@ export function createGateway(cfg) {
         model: typeof body?.model === 'string' ? body.model : null,
         resolved: ctx.resolved ?? null,
         provider: ctx.provider ?? null,
-        status: res.statusCode,
+        status: ctx.status ?? res.statusCode,
         ms: Date.now() - t0,
         fallback: ctx.fallback ?? false,
         stream: body?.stream === true,
+        ...(ctx.streamError ? { stream_error: ctx.streamError } : {}),
         ...(ctx.redacted ? { redacted: ctx.redacted } : {}),
       });
       return;
@@ -176,7 +203,6 @@ export function createGateway(cfg) {
     sendError(res, 404, 'Bulunamadı.', 'not_found');
   });
 
-  // Hatalı HTTP istemcilerinde süreci düşürme.
   server.on('clientError', (_err, socket) => {
     try {
       socket.end('HTTP/1.1 400 Bad Request\r\n\r\n');

@@ -3,7 +3,6 @@
 
 export const ALL_TYPES = ['tckn', 'telefon', 'email', 'iban'];
 
-// Eş anlamlıları kanonik tipe indir.
 const ALIASES = {
   tc: 'tckn',
   kimlik: 'tckn',
@@ -17,8 +16,6 @@ export function normalizeType(t) {
   const k = String(t).toLocaleLowerCase('tr-TR').trim();
   return ALIASES[k] || k;
 }
-
-// --- Doğrulayıcılar (yanlış-pozitifi kır) ---
 
 export function isValidTCKN(s) {
   if (!/^[1-9]\d{10}$/.test(s)) return false;
@@ -43,12 +40,9 @@ export function isValidIBAN_TR(raw) {
   return rem === 1;
 }
 
-// --- Dedektörler ---
-
 const EMAIL_RE = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
 const IBAN_RE = /TR\d{2}(?:[ ]?\d){22}/gi;
 const TCKN_RE = /(?<!\d)\d{11}(?!\d)/g;
-// Telefon: +90 ya da 0 öneki gerekli (yanlış-pozitifi azaltır).
 const PHONE_RE = /(?:\+90[\s-]?|0)\(?\d{3}\)?[\s-]?\d{3}[\s-]?\d{2}[\s-]?\d{2}/g;
 
 const DETECTORS = {
@@ -74,7 +68,6 @@ const DETECTORS = {
   },
 };
 
-// Sıra önemli: spesifik/doğrulanan önce, en bulanık (telefon) sonda.
 const ORDER = ['email', 'iban', 'tckn', 'telefon'];
 
 export function redactText(text, types) {
@@ -92,7 +85,6 @@ export function redactText(text, types) {
   return { text: out, counts };
 }
 
-// messages[].content (string veya çok-parçalı dizi) içindeki PII'yi maskele.
 export function redactMessages(messages, types) {
   if (!Array.isArray(messages) || !Array.isArray(types) || types.length === 0) {
     return { messages, counts: {}, total: 0 };
@@ -128,8 +120,23 @@ export function redactMessages(messages, types) {
   return { messages: out, counts, total };
 }
 
+// Ollama api_base gerçekten loopback mı? (boş → varsayılan 127.0.0.1:11434). Ayrıştırılamaz → hayır.
+function isLoopbackBase(apiBase) {
+  if (apiBase === undefined || apiBase === null || String(apiBase).trim() === '') return true;
+  let host;
+  try {
+    host = new URL(String(apiBase).trim()).hostname.toLowerCase();
+  } catch {
+    return false;
+  }
+  host = host.replace(/^\[|\]$/g, '');
+  if (host === 'localhost' || host === '::1') return true;
+  const m = /^127\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
+  return !!m && m.slice(1).every((x) => Number(x) <= 255);
+}
+
 // Bu istek için hangi tipler maskelenecek? null → maskeleme yok.
-// Varsayılan: yerel 'ollama' hariç dış sağlayıcılarda maskele. modelCfg.redact override eder.
+// Varsayılan: yalnız loopback'teki Ollama muaf; diğer her şey maskelenir. modelCfg.redact override eder.
 export function resolveTypes(cfg, modelCfg) {
   const sec = cfg?.security || {};
   if (sec.redact_pii !== true) return null;
@@ -137,7 +144,8 @@ export function resolveTypes(cfg, modelCfg) {
   let on;
   if (modelCfg?.redact === true) on = true;
   else if (modelCfg?.redact === false) on = false;
-  else on = modelCfg?.provider !== 'ollama';
+  else if (modelCfg?.provider === 'ollama') on = !isLoopbackBase(modelCfg.api_base);
+  else on = true;
   if (!on) return null;
 
   const list = Array.isArray(sec.pii) && sec.pii.length ? sec.pii : ALL_TYPES;

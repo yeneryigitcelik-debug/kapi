@@ -1,4 +1,4 @@
-// Sağlayıcı kayıt defteri. Her adaptör chat(modelCfg, body, {timeoutMs}) → OpenAI-formatlı
+// Sağlayıcı kayıt defteri. Her adaptör chat(modelCfg, body, {timeoutMs, signal}) → OpenAI-formatlı
 // fetch Response döndürür (router provider-agnostik kalır; çeviri sağlayıcının işi).
 import { ProviderError, trimSlash, fetchWithTimeout } from './base.js';
 import { anthropic } from './anthropic.js';
@@ -12,20 +12,21 @@ function buildHeaders(modelCfg) {
 }
 
 const openaiCompatible = {
-  async chat(modelCfg, body, { timeoutMs }) {
+  async chat(modelCfg, body, { timeoutMs, signal }) {
     const base = trimSlash(modelCfg.api_base);
     if (!base) {
       throw new ProviderError(`Model '${modelCfg.name}' için api_base gerekli.`, 400);
     }
     const url = `${base}/chat/completions`;
-    // Takma adı gerçek model adıyla değiştir.
     const payload = JSON.stringify({ ...body, model: modelCfg.model });
     const res = await fetchWithTimeout(
       url,
       { method: 'POST', headers: buildHeaders(modelCfg), body: payload },
-      timeoutMs
+      timeoutMs,
+      signal
     );
     if (!res.ok) {
+      res.cancelUpstream?.();
       throw new ProviderError(`Sağlayıcı hatası (${res.status}) — model '${modelCfg.name}'.`, res.status);
     }
     return res;
@@ -33,22 +34,21 @@ const openaiCompatible = {
 };
 
 const ollama = {
-  async chat(modelCfg, body, { timeoutMs }) {
-    // Ollama'nın OpenAI-uyumlu ucu.
+  async chat(modelCfg, body, { timeoutMs, signal }) {
     const base = trimSlash(modelCfg.api_base) || 'http://127.0.0.1:11434';
     const url = `${base}/v1/chat/completions`;
     const payload = JSON.stringify({ ...body, model: modelCfg.model });
     const res = await fetchWithTimeout(
       url,
       { method: 'POST', headers: buildHeaders(modelCfg), body: payload },
-      timeoutMs
+      timeoutMs,
+      signal
     );
     if (!res.ok) {
-      throw new ProviderError(
-        `Ollama hatası (${res.status}) — model '${modelCfg.model}'. ` +
-          `Modeli indirdin mi? 'ollama pull ${modelCfg.model}'.`,
-        res.status
-      );
+      res.cancelUpstream?.();
+      const err = new ProviderError(`Ollama hatası (${res.status}) — model '${modelCfg.name}'.`, res.status);
+      err.hint = `Modeli indirdin mi? 'ollama pull ${modelCfg.model}'.`; // yalnız sunucu logu
+      throw err;
     }
     return res;
   },

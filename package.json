@@ -9,7 +9,7 @@
   "scripts": {
     "start": "node bin/kapi.js up",
     "dev": "node bin/kapi.js up",
-    "test": "node test-e2e.js"
+    "test": "node test-e2e.js && node --test test-reliability.js"
   },
   "engines": {
     "node": ">=20"
