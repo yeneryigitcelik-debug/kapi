@@ -223,6 +223,8 @@ models:
 
 Upstream HTTP yönlendirmeleri izlenmez; `api_base` son hizmet adresini göstermelidir. Böylece POST gövdesi ve özel kimlik başlıkları başka bir origin'e yönlendirilmez.
 
+HTTP `200` olsa bile boş `choices` dizisi ya da nesne olmayan choice üyeleri geçersiz yanıttır. Akışta ilk gerçek choice gelmeden `[DONE]` veya boş-choice kullanım özeti başarı sayılmaz; veri aktarımı başlamadıysa yedek denenir. Gerçek choice sonrasındaki boş `choices: []` kullanım özeti, boş metin, ret, araç çağrıları ve çoklu choice yanıtları korunur. Bu kontrol tam bir sağlayıcı şeması doğrulaması değildir. Kullanım özeti sırası için [OpenAI akış olayları referansına](https://developers.openai.com/api/reference/resources/chat/subresources/completions/streaming-events) bakın.
+
 **Anthropic metin köprüsü.** Sistem/kullanıcı/asistan metni, metin parçaları dizisi ve akış desteklenir. Araç çağrıları, görsel parçaları ve yapılandırılmış çıktı sessizce atılmak yerine açıklayıcı `400` döndürür. Sağlayıcının politika reddi fallback başlatmaz. Maskeleme standart `model` metaverisinde ve kapının genel hata mesajlarında uygulanır; üretilen yanıt metnini veya sağlayıcının özel veri alanlarını yeniden yazmaz.
 
 **Redaksiyon açıldığında** (`security.redact_pii: true`) tüm non-Ollama sağlayıcıları varsayılan maskelenir. Yalnız loopback adresindeki Ollama ucu otomatik muaf kalır; uzak Ollama da maskelenir. Modeldeki `redact` seçimi bu muafiyeti değiştirir. Yerel bir proxy veya buluta yönlendiren Ollama modeli için `redact: true` seçin: uç adresi, modelin nerede çalıştığını kanıtlamaz. Redaksiyon mesajların metin bölümlerindeki yapılandırılmış TCKN/TR IBAN, telefon ve e-posta eşleşmelerini işler; görselleri veya araç argümanlarını taramaz.
@@ -349,7 +351,7 @@ yazılır, geçici hatada sıradaki modele geçilir → sonda yalnız metadata `
 
 ```bash
 node test-e2e.js     # mevcut 46 birim / uçtan uca kontrol
-node --test test-reliability.js # 12 grup / 66 ağ, protokol, gövde sınırı ve yapılandırma senaryosu
+node --test test-reliability.js # 13 grup / 94 ağ, protokol, gövde sınırı ve yapılandırma senaryosu
 npm test             # iki paketi de çalıştırır; gerçek sağlayıcı / anahtar gerekmez
 npm ls --all         # yalnızca yaml@2 görünmeli — projenin konumlama iddiası
 ```

@@ -32,6 +32,7 @@ const STREAM_HEADERS = {
 };
 const FINISH = new Set(['stop', 'length', 'tool_calls', 'content_filter', 'function_call']);
 const STREAM_CODES = new Set(['upstream_stream_error', 'upstream_stream_truncated']);
+const isPlainObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 
 // Çerçeve-farkında SSE okuyucu: maskelenmiş OpenAI olaylarını tek tek verir.
 // Geçerli sonlandırıcı: [DONE] ya da finish_reason. Yoksa/upstream hata çerçevesi → ProviderError.
@@ -43,6 +44,7 @@ function sseEvents(body, alias) {
   let done = false;
   let sawDone = false;
   let sawFinish = false;
+  let sawChoice = false;
 
   const handle = (block) => {
     const other = [];
@@ -54,6 +56,9 @@ function sseEvents(body, alias) {
     if (!data.length) return;
     const payload = data.join('\n');
     if (payload.trim() === '[DONE]') {
+      if (!sawChoice) {
+        throw new ProviderError('Üst sunucu akışı erken kapandı.', 502, 'upstream_stream_truncated');
+      }
       sawDone = true;
       queue.push('data: [DONE]');
       return;
@@ -66,6 +71,12 @@ function sseEvents(body, alias) {
     }
     if (!obj || typeof obj !== 'object' || Array.isArray(obj) || obj.error) {
       throw new ProviderError('Üst sunucu akış hatası.', 502, 'upstream_stream_error');
+    }
+    if (Object.hasOwn(obj, 'choices')) {
+      if (!Array.isArray(obj.choices) || !obj.choices.every(isPlainObject) || (!sawChoice && obj.choices.length === 0)) {
+        throw new ProviderError('Üst sunucu akış hatası.', 502, 'upstream_stream_error');
+      }
+      if (obj.choices.length) sawChoice = true;
     }
     if ('model' in obj) obj.model = alias;
     if (Array.isArray(obj.choices) && obj.choices.some((c) => FINISH.has(c?.finish_reason))) sawFinish = true;
@@ -203,7 +214,12 @@ export async function route({ body, cfg, modelIndex, res, log, ctx = {}, allowed
         } else {
           json = await readJsonBody(upstream);
           upstream.cancelUpstream?.();
-          if (!json || typeof json !== 'object' || json.error || !Array.isArray(json.choices)) {
+          if (
+            !json || typeof json !== 'object' || json.error ||
+            !Array.isArray(json.choices) ||
+            !json.choices.length ||
+            !json.choices.every(isPlainObject)
+          ) {
             throw new ProviderError('Üst sunucu geçersiz yanıt döndürdü.', 502, 'upstream_invalid_response');
           }
         }

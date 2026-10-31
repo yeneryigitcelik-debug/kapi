@@ -929,3 +929,114 @@ test('12 final F1/F2/F3 regressions', { timeout: 20000 }, async (t) => {
     assert.equal(resolveTypes(cfg, { provider: 'openai-compatible' }), null);
   });
 });
+
+test('13 empty provider completions fail before commit; valid choice variants survive', { timeout: 20000 }, async (t) => {
+  const invalidChoices = [['empty', []], ['null member', [null]], ['string member', ['PRIVATE-EMPTY-MARKER']], ['array member', [[]]]];
+  for (const kind of ['openai', 'ollama']) {
+    for (const [label, choices] of invalidChoices) {
+      await t.test(`${kind}: JSON ${label} falls back once; solo returns sanitized502`, async st => {
+        const s = scope(st);
+        const primary = await upstream(s, (_req, res) => sendJson(res, { id: 'fixture', model: 'PRIVATE-EMPTY-MODEL', choices, private_field: 'PRIVATE-EMPTY-MARKER' }));
+        const bak = await backup(s);
+        const gw = await gateway(s, [model(kind, 'empty', primary.base), model(kind, 'solo', primary.base), model('openai', 'backup', bak.base)], { fallbacks: { empty: ['backup'] } });
+        const recovered = await chat(s, gw.base, 'empty');
+        assert.equal(recovered.json?.choices?.[0]?.message?.content, 'BACKUP', 'invalid provider choice must not become a successful client completion');
+        assertBackupJson(recovered, 'empty');
+        assert.equal(bak.calls, 1);
+        const solo = await chat(s, gw.base, 'solo');
+        assert.equal(solo.status, 502, solo.text);
+        assert.equal(solo.json?.error?.code, 'upstream_invalid_response');
+        assert.equal(primary.calls, 2);
+        assert.equal(bak.calls, 1, 'no backup configured for solo');
+        for (const r of [recovered, solo]) assert.ok(!r.text.includes('PRIVATE-EMPTY-') && !r.text.includes(SECRET), 'provider fields or credentials leaked');
+        const rows = await waitAudit(s, gw.auditPath, 2);
+        assert.equal(rows?.length, 2);
+        assert.deepEqual(rows.map(r => ({ model: r.model, status: r.status, fallback: r.fallback })), [{ model: 'empty', status: 200, fallback: true }, { model: 'solo', status: 502, fallback: false }]);
+        assert.ok(!readFileSync(gw.auditPath, 'utf8').includes('PRIVATE-EMPTY-') && !readFileSync(gw.auditPath, 'utf8').includes(SECRET));
+      });
+    }
+
+    for (const [label, frames] of [
+      ['DONE only', 'data: [DONE]\n\n'],
+      ['usage-only before DONE', 'data: ' + JSON.stringify({ model: 'PRIVATE-EMPTY-MODEL', choices: [], usage: { total_tokens: 7 } }) + '\n\ndata: [DONE]\n\n'],
+      ['invalid choice member before DONE', 'data: ' + JSON.stringify({ model: 'PRIVATE-EMPTY-MODEL', choices: [null] }) + '\n\ndata: [DONE]\n\n'],
+    ]) {
+      await t.test(`${kind}: SSE ${label} falls back once; solo returns sanitized502`, async st => {
+        const s = scope(st);
+        const primary = await upstream(s, (_req, res) => { sseHeaders(res); res.end(frames); });
+        const bak = await backup(s);
+        const gw = await gateway(s, [model(kind, 'empty', primary.base), model(kind, 'solo', primary.base), model('openai', 'backup', bak.base)], { fallbacks: { empty: ['backup'] } });
+        const recovered = await chat(s, gw.base, 'empty', { stream: true });
+        assertBackupSSE(recovered, 'empty');
+        assert.equal(bak.calls, 1);
+        const solo = await chat(s, gw.base, 'solo', { stream: true });
+        assert.equal(solo.status, 502, solo.text);
+        assert.ok(solo.json?.error, 'uncommitted malformed stream must be an ordinary error response');
+        assert.ok(!solo.text.includes('[DONE]') && !solo.text.includes('"finish_reason"'));
+        assert.equal(primary.calls, 2);
+        assert.equal(bak.calls, 1);
+        assert.ok(!solo.text.includes('PRIVATE-EMPTY-') && !solo.text.includes(SECRET));
+        const rows = await waitAudit(s, gw.auditPath, 2);
+        assert.equal(rows?.length, 2);
+        assert.deepEqual(rows.map(r => ({ model: r.model, status: r.status, fallback: r.fallback })), [{ model: 'empty', status: 200, fallback: true }, { model: 'solo', status: 502, fallback: false }]);
+        assert.ok(!readFileSync(gw.auditPath, 'utf8').includes(SECRET));
+      });
+    }
+
+    for (const [label, choice] of [
+      ['empty text', { index: 0, message: { role: 'assistant', content: '' }, finish_reason: 'stop' }],
+      ['refusal', { index: 0, message: { role: 'assistant', content: null, refusal: 'Synthetic refusal' }, finish_reason: 'stop' }],
+      ['tool call', { index: 0, message: { role: 'assistant', content: null, tool_calls: [{ id: 'call_fixture', type: 'function', function: { name: 'fixture', arguments: '{}' } }] }, finish_reason: 'tool_calls' }],
+      ['multiple choices', null],
+    ]) {
+      await t.test(`${kind}: legitimate JSON ${label} keeps every extension and skips backup`, async st => {
+        const s = scope(st);
+        const choices = choice ? [choice] : [{ index: 0, message: { role: 'assistant', content: 'FIRST' }, finish_reason: 'stop' }, { index: 1, message: { role: 'assistant', content: 'SECOND', extension: 'kept' }, finish_reason: 'length' }];
+        const payload = { ...okJson(kind, 'private-control-model', ''), choices, error: null, system_fingerprint: 'fp_fixture', extension: { kept: true } };
+        const primary = await upstream(s, (_req, res) => sendJson(res, payload));
+        const bak = await backup(s);
+        const gw = await gateway(s, [model(kind, 'valid', primary.base), model('openai', 'backup', bak.base)], { fallbacks: { valid: ['backup'] } });
+        const r = await chat(s, gw.base, 'valid');
+        assert.equal(r.status, 200, r.text);
+        assert.deepEqual(r.json, { ...payload, model: 'valid' });
+        assert.equal(bak.calls, 0);
+        const rows = await waitAudit(s, gw.auditPath);
+        assert.equal(rows?.[0].status, 200);
+        assert.equal(rows?.[0].fallback, false);
+      });
+    }
+
+    for (const variant of ['tool choice then usage trailer', 'content then DONE without finish', 'finish then EOF without DONE']) {
+      await t.test(`${kind}: SSE ${variant} retains compatible success`, async st => {
+        const s = scope(st);
+        const real = 'private-stream-control';
+        const toolDelta = { tool_calls: [{ index: 0, id: 'call_fixture', type: 'function', function: { name: 'fixture', arguments: '{}' } }] };
+        const usage = 'data: ' + JSON.stringify({ model: real, choices: [], usage: { prompt_tokens: 3, completion_tokens: 4, total_tokens: 7 } }) + '\n\n';
+        const extension = 'data: ' + JSON.stringify({ model: real, vendor_extension: 'kept' }) + '\n\n';
+        const frames = variant === 'tool choice then usage trailer'
+          ? extension + oaiFrame(real, toolDelta) + oaiFrame(real, {}, 'tool_calls') + usage + 'data: [DONE]\n\n'
+          : variant === 'content then DONE without finish'
+            ? oaiFrame(real, { role: 'assistant', content: 'PRIMARY' }) + 'data: [DONE]\n\n'
+            : oaiFrame(real, { content: 'PRIMARY' }) + oaiFrame(real, {}, 'stop');
+        const primary = await upstream(s, (_req, res) => { sseHeaders(res); res.end(frames); });
+        const bak = await backup(s);
+        const gw = await gateway(s, [model(kind, 'valid', primary.base), model('openai', 'backup', bak.base)], { fallbacks: { valid: ['backup'] } });
+        const r = await chat(s, gw.base, 'valid', { stream: true });
+        assert.equal(r.status, 200, r.text);
+        const decoded = decodeSSE(r.text);
+        assert.ok(!decoded.some(e => e.json?.error), r.text);
+        assert.equal(decoded.some(e => e.done), variant !== 'finish then EOF without DONE');
+        for (const frame of decoded) if (frame.json?.model) assert.equal(frame.json.model, 'valid');
+        if (variant === 'tool choice then usage trailer') {
+          assert.ok(decoded.some(e => e.json?.vendor_extension === 'kept'));
+          assert.ok(decoded.some(e => e.json?.choices?.[0]?.delta?.tool_calls?.[0]?.function?.name === 'fixture'));
+          assert.ok(decoded.some(e => e.json?.choices?.length === 0 && e.json?.usage?.total_tokens === 7));
+        }
+        assert.equal(bak.calls, 0);
+        const rows = await waitAudit(s, gw.auditPath);
+        assert.equal(rows?.[0].status, 200);
+        assert.equal(rows?.[0].fallback, false);
+      });
+    }
+  }
+});
