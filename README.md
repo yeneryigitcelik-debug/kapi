@@ -74,23 +74,23 @@ API anahtarları oradan geçer. O yüzden bir gateway'de en çok istediğin şey
   yediği supply-chain saldırısını hatırla: bir gateway'in dependency ağacı ne kadar küçükse,
   o kadar az yerden vurulabilir. Burada `npm ls --all` çıktısı **tek bir paket**.)
 - **🇹🇷 KVKK-first varsayılanlar.** Yalnızca `127.0.0.1` dinler. Prompt/yanıt içeriği
-  **diske yazılmaz** (`log_bodies: false`). Veriler senin sunucunda kalır; yurt dışına
-  zorunlu bir tur atmaz.
-- **🧹 PII redaksiyonu.** İçerik **dış sağlayıcıya gitmeden** TCKN (checksum doğrulamalı),
-  telefon, e-posta ve IBAN (mod-97 doğrulamalı) maskelenir. Yerel `ollama` muaftır — veri
-  zaten makineden çıkmıyor. (`redact_pii: true`)
+  **diske yazılmaz** (`log_bodies: false`). İçeriğin hangi sağlayıcıya gideceği yapılandırmaya
+  bağlıdır; yerel uç ile çalışabilir veya seçtiğin harici sağlayıcıya gönderebilirsin.
+- **🧹 PII redaksiyonu.** `redact_pii: true` açıldığında TCKN (checksum doğrulamalı),
+  telefon, e-posta ve TR IBAN (mod-97 doğrulamalı) metin eşleşmeleri gönderimden önce maskelenir.
+  Yalnız loopback Ollama ucu varsayılan muaf kalır; uzak Ollama da maskelenir.
 - **🪪 Per-key model scope.** Bir anahtar yalnız kendine tanımlı modelleri görür ve çağırır;
   fallback zinciri bile scope dışına **kaçamaz** (403). `/v1/models` de scope'a göre filtrelenir.
 - **📋 Denetim günlüğü.** İstek başına yalnız metadata (model, status, ms, fallback, kaç PII
   maskelendi) JSONL'e yazılır — **içerik asla.** (`audit_log`)
-- **🎭 Model maskeleme.** İstemci sadece takma adı görür. Gerçek model adı ve `api_base`
-  yanıtlara sızmaz — stream modunda bile `model` alanı takma adla yeniden yazılır.
+- **🎭 Model maskeleme.** Standart `model` metaverisi stream dahil takma adla yeniden yazılır;
+  kapının genel hata mesajları gerçek model adını veya `api_base` değerini içermez.
 - **🔑 Anahtarlar koda/config'e düz metin girmez.** `${ENV}` ile enjekte edilir; değişken
   eksikse gateway **sessizce boş geçmez, net hata fırlatır.**
 - **⏱ Sabit zamanlı kimlik doğrulama.** Anahtarlar SHA-256 hash'lenip
   `crypto.timingSafeEqual` ile karşılaştırılır — zamanlama sızıntısı yok.
 - **🔁 Akıllı fallback.** Bir model `5xx/429/ağ` hatası verirse sıradaki yedeğe geçilir.
-  `4xx` (istemci hatası) fallback **tetiklemez** — aynı hata başka modelde de tekrarlanacağı
+  `4xx` (429 dışında) fallback **tetiklemez** — aynı hata başka modelde de tekrarlanacağı
   için boşuna deneme yapılmaz.
 
 ---
@@ -196,7 +196,7 @@ security:
   audit_log: kapi-audit.jsonl   # istek metadata'sı (içerik YOK)
 
 routing:
-  timeout_ms: 120000
+  timeout_ms: 120000       # her sağlayıcı denemesinde başlık + tüm gövde/akış için toplam süre
   fallbacks:               # 5xx/429/ağ → sırayla dene (4xx tetiklemez)
     yerel-hizli: [deepseek, yerel-buyuk]
 
@@ -219,9 +219,21 @@ models:
 **Sağlayıcılar:** `ollama`, `openai-compatible` (DeepSeek/vLLM/OpenRouter/Together…) ve
 `anthropic` (Claude — OpenAI ↔ Messages çevirisini, `max_tokens` ve stream dahil, kapı üstlenir).
 
+**Süre ve akış sözleşmesi.** `timeout_ms`, her sağlayıcı denemesinde başlıklar ve tüm yanıt gövdesi/akışı için toplam süredir; her parçada yenilenen bir idle timeout değildir. Uzun üretimler için bu değeri yükseltin. İstemci bağlantıyı kapatınca upstream de iptal edilir. JSON gövdesi veya ilk akış olayı istemciye aktarılmadan başarısız olursa scope içindeki yedek denenebilir. Aktarım başladıktan sonra fallback yapılmaz: kopan/bozuk akış genel bir SSE hata çerçevesiyle bildirilir ve audit kaydında başarılı sayılmaz. Başarısız Anthropic akışına sahte `[DONE]` veya başarılı bitiş eklenmez.
+
+Upstream HTTP yönlendirmeleri izlenmez; `api_base` son hizmet adresini göstermelidir. Böylece POST gövdesi ve özel kimlik başlıkları başka bir origin'e yönlendirilmez.
+
+HTTP `200` olsa bile boş `choices` dizisi ya da nesne olmayan choice üyeleri geçersiz yanıttır. Akışta ilk gerçek choice gelmeden `[DONE]` veya boş-choice kullanım özeti başarı sayılmaz; veri aktarımı başlamadıysa yedek denenir. Gerçek choice sonrasındaki boş `choices: []` kullanım özeti, boş metin, ret, araç çağrıları ve çoklu choice yanıtları korunur. Bu kontrol tam bir sağlayıcı şeması doğrulaması değildir. Kullanım özeti sırası için [OpenAI akış olayları referansına](https://developers.openai.com/api/reference/resources/chat/subresources/completions/streaming-events) bakın.
+
+İndeksli akış `[DONE]` gelmeden kapanırsa, görülen tüm geçerli indekslerin bitiş nedeni alınmış olmalıdır; aksi hâlde aktarım başladıktan sonra genel kesik-akış hatası ve başarısız audit kaydı üretilir, yedek denenmez. Akış başına en fazla 256 farklı, negatif olmayan güvenli-tamsayı indeksi izlenir. Daha fazla indeks için `[DONE]` gerekir; bu işaret varsa her choice için bitiş nedeni aranmaz. İstekteki `n` sayısından eksik choice çıkarımı yapılmaz. İndekssiz akışlar eski genel-bitiş kuralını korur; indeksli ve indekssiz choice karışımlarının tamamlandığı bütünüyle doğrulanmaz.
+
+**Anthropic metin köprüsü.** Sistem/kullanıcı/asistan metni, metin parçaları dizisi ve akış desteklenir. Araç çağrıları, görsel parçaları ve yapılandırılmış çıktı sessizce atılmak yerine açıklayıcı `400` döndürür. Sağlayıcının politika reddi fallback başlatmaz. Maskeleme standart `model` metaverisinde ve kapının genel hata mesajlarında uygulanır; üretilen yanıt metnini veya sağlayıcının özel veri alanlarını yeniden yazmaz.
+
+**Redaksiyon açıldığında** (`security.redact_pii: true`) tüm non-Ollama sağlayıcıları varsayılan maskelenir. Yalnız loopback adresindeki Ollama ucu otomatik muaf kalır; uzak Ollama da maskelenir. Modeldeki `redact` seçimi bu muafiyeti değiştirir. Yerel bir proxy veya buluta yönlendiren Ollama modeli için `redact: true` seçin: uç adresi, modelin nerede çalıştığını kanıtlamaz. Redaksiyon mesajların metin bölümlerindeki yapılandırılmış TCKN/TR IBAN, telefon ve e-posta eşleşmelerini işler; görselleri veya araç argümanlarını taramaz.
+
 **Doğrulama dahili.** En az bir model zorunludur; `name`/`provider`/`model` alanları
 gerekli; isimler benzersiz olmalı; her fallback tanımlı bir modele işaret etmeli;
-`require_key: true` ise `keys` boş olamaz. Hatalı config → tek satırlık, Türkçe, net hata.
+`require_key: true` ise `keys` boş olamaz. `security.pii` yalnız tanınan tipleri ve mevcut takma adlarını kabul eder; bilinmeyen veya string olmayan bir giriş yapılandırma hatasıdır. Hatalı config → tek satırlık, Türkçe, net hata.
 
 ---
 
@@ -234,7 +246,7 @@ gerekli; isimler benzersiz olmalı; her fallback tanımlı bir modele işaret et
 | `GET /health` · `/healthz` | — | `{ "status": "ok", "models": N }`. Auth gerektirmez. |
 
 Hatalar OpenAI hata zarfında döner: `{ "error": { "message", "type", "code" } }`.
-CORS açık (`*`), `OPTIONS` → `204`. İstek gövdesi üst sınırı **10MB** (aşılırsa `413`).
+CORS açık (`*`), `OPTIONS` → `204`. İstek gövdesi üst sınırı **10MB** (aşılırsa JSON `413`); denetim günlüğü açıksa yalnız metadata içeren tek ret kaydı yazılır. Upstream HTTP `200` içindeki hata zarfı veya geçersiz completion yapısı başarı sayılmaz: istemciye veri başlamadan scope içi yedek denenebilir, yedek yoksa genel `502` döner.
 
 ---
 
@@ -331,8 +343,8 @@ test-e2e.js              sahte upstream'lerle uçtan uca test
 ```
 
 **İstek akışı:** `server` gövdeyi (≤10MB) okur → `auth` anahtarı doğrular ve scope'u çözer →
-`router` deneme zincirini (`[istenen, ...fallbacks]`, scope'la filtreli) kurar → dış sağlayıcıysa
-**PII maskelenir** → `provider` upstream'e gider → başarıda yanıt (model adı) maskelenip istemciye
+`router` deneme zincirini (`[istenen, ...fallbacks]`, scope'la filtreli) kurar → redaksiyon açıksa
+ve uç muaf değilse **PII metinleri maskelenir** → `provider` upstream'e gider → başarıda model metaverisi maskelenip istemciye
 yazılır, geçici hatada sıradaki modele geçilir → sonda yalnız metadata `audit_log`'a düşer.
 
 ---
@@ -340,8 +352,9 @@ yazılır, geçici hatada sıradaki modele geçilir → sonda yalnız metadata `
 ## Geliştirme ve test
 
 ```bash
-node test-e2e.js     # birim + uçtan uca — 46 assertion, hepsi geçmeli
-npm test             # = yukarısı
+node test-e2e.js     # mevcut 46 birim / uçtan uca kontrol
+node --test test-reliability.js # 14 grup / 114 ağ, protokol, gövde sınırı ve yapılandırma senaryosu
+npm test             # iki paketi de çalıştırır; gerçek sağlayıcı / anahtar gerekmez
 npm ls --all         # yalnızca yaml@2 görünmeli — projenin konumlama iddiası
 ```
 

@@ -2,6 +2,7 @@
 import { readFileSync, existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import YAML from 'yaml';
+import { ALL_TYPES, normalizeType } from '../security/pii.js';
 
 export class ConfigError extends Error {
   constructor(message) {
@@ -130,6 +131,14 @@ function validate(cfg) {
   if (cfg.security?.pii !== undefined && !Array.isArray(cfg.security.pii)) {
     throw new ConfigError('security.pii bir dizi olmalı (örn. [tckn, telefon, email, iban]).');
   }
+  (cfg.security?.pii ?? []).forEach((t, i) => {
+    if (typeof t !== 'string') {
+      throw new ConfigError(`security.pii[${i}] bir string olmalı (tckn, telefon, email, iban).`);
+    }
+    if (!ALL_TYPES.includes(normalizeType(t))) {
+      throw new ConfigError(`security.pii[${i}] bilinmeyen PII tipi; geçerli: ${ALL_TYPES.join(', ')}.`);
+    }
+  });
   if (
     cfg.security?.audit_log !== undefined &&
     cfg.security.audit_log !== null &&

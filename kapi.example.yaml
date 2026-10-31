@@ -24,7 +24,7 @@ security:
   # audit_log: kapi-audit.jsonl      # istek başına SADECE metadata (model/status/ms) — içerik YOK
 
 routing:
-  timeout_ms: 120000
+  timeout_ms: 120000 # her denemede başlık + tüm gövde/akış için toplam süre; idle timeout değil
   fallbacks:
     yerel-hizli: [deepseek, yerel-buyuk]
 
