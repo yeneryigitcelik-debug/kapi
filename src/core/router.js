@@ -45,6 +45,9 @@ function sseEvents(body, alias) {
   let sawDone = false;
   let sawFinish = false;
   let sawChoice = false;
+  const CAP = 256;
+  const term = new Map();
+  let overflow = false;
 
   const handle = (block) => {
     const other = [];
@@ -77,6 +80,19 @@ function sseEvents(body, alias) {
         throw new ProviderError('Üst sunucu akış hatası.', 502, 'upstream_stream_error');
       }
       if (obj.choices.length) sawChoice = true;
+      for (const c of obj.choices) {
+        const fin = FINISH.has(c.finish_reason);
+        const idx = c.index;
+        if (Number.isSafeInteger(idx) && idx >= 0) {
+          if (term.has(idx)) {
+            if (fin) term.set(idx, true);
+          } else if (term.size < CAP) {
+            term.set(idx, fin);
+          } else {
+            overflow = true;
+          }
+        }
+      }
     }
     if ('model' in obj) obj.model = alias;
     if (Array.isArray(obj.choices) && obj.choices.some((c) => FINISH.has(c?.finish_reason))) sawFinish = true;
@@ -111,9 +127,21 @@ function sseEvents(body, alias) {
           if (buf.replace(/\r/g, '').trim()) handle(buf.replace(/\r/g, ''));
           buf = '';
           done = true;
-          if (!sawDone && !sawFinish) {
-            queue.length = 0;
-            if (!queue.length && !sawFinish) {
+          if (!sawDone) {
+            let complete = sawFinish;
+            if (term.size > 0) {
+              complete = !overflow;
+              if (complete) {
+                for (const v of term.values()) {
+                  if (v !== true) {
+                    complete = false;
+                    break;
+                  }
+                }
+              }
+            }
+            if (!complete) {
+              queue.length = 0;
               throw new ProviderError('Üst sunucu akışı erken kapandı.', 502, 'upstream_stream_truncated');
             }
           }

@@ -1040,3 +1040,66 @@ test('13 empty provider completions fail before commit; valid choice variants su
     }
   }
 });
+
+test('14 observed indexed choices must all finish at EOF without DONE', { timeout: 20000 }, async t => {
+  const frame = choices => 'data: ' + JSON.stringify({ model: 'private-multi-model', choices }) + '\n\n';
+  const chunk = (index, content, finish = null) => ({ index, delta: content === null ? {} : { content }, finish_reason: finish });
+  for (const kind of ['openai', 'ollama']) {
+    const partial = frame([chunk(0, 'FIRST'), chunk(1, 'SECOND-PARTIAL')]);
+    const finishFirst = frame([chunk(0, null, 'stop')]);
+    const cases = [
+      { name: 'one finishes while other remains open, delayed EOF', parts: [partial, finishFirst], fail: true },
+      { name: 'one finishes while other remains open, one TCP body', parts: [partial + finishFirst], fail: true },
+      { name: 'all observed choices finish without DONE, requested n is not inferred', parts: [partial + finishFirst + frame([chunk(1, null, 'length')])], requestN: 10 },
+      { name: 'DONE is authoritative without per-choice finish reasons', parts: [partial + 'data: [DONE]\n\n'], done: true },
+      { name: 'indexless legacy completion remains supported', parts: [frame([{ delta: { content: 'LEGACY' }, finish_reason: null }]) + frame([{ delta: {}, finish_reason: 'stop' }])] },
+      { name: 'sparse maximum safe index does not allocate by max index', parts: [frame([chunk(0, 'FIRST', 'stop'), chunk(Number.MAX_SAFE_INTEGER, 'SPARSE', 'stop')])] },
+      { name: '256 distinct finished indices may end without DONE', parts: [frame(Array.from({ length: 256 }, (_, i) => chunk(i, '', 'stop')))] },
+      { name: '257 distinct indices require DONE instead of unverifiable EOF', parts: [frame(Array.from({ length: 257 }, (_, i) => chunk(i, '', 'stop')))], fail: true },
+      { name: '257 distinct indices still accept authoritative DONE', parts: [frame(Array.from({ length: 257 }, (_, i) => chunk(i, '', 'stop'))) + 'data: [DONE]\n\n'], done: true },
+      { name: 'terminal state is monotonic across 300 repeated index chunks', parts: [frame([chunk(0, '', 'stop')]) + Array.from({ length: 300 }, () => frame([chunk(0, '')])).join('') + frame([chunk(1, '', 'stop')])] },
+    ];
+    for (const c of cases) {
+      await t.test(`${kind}: ${c.name}`, async st => {
+        const s = scope(st);
+        let observedN;
+        const primary = await upstream(s, (_req, res, body) => {
+          observedN = body.n;
+          sseHeaders(res);
+          if (c.parts.length === 1) return res.end(c.parts[0]);
+          res.write(c.parts[0]);
+          s.timer(() => res.end(c.parts[1]), 15);
+        });
+        const bak = await backup(s);
+        const gw = await gateway(s, [model(kind, 'multi', primary.base), model('openai', 'backup', bak.base)], { fallbacks: { multi: ['backup'] } });
+        const abort = new AbortController();
+        const timer = s.timer(() => abort.abort(), 1500);
+        let r, text;
+        try {
+          r = await realFetch(gw.base + '/v1/chat/completions', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ model: 'multi', n: c.requestN ?? 2, stream: true, messages: [{ role: 'user', content: 'synthetic multi-choice request' }] }), signal: abort.signal });
+          text = await r.text();
+        } finally { clearTimeout(timer); }
+        assert.equal(r.status, 200, 'data already committed; never replace with another model');
+        assert.equal(observedN, c.requestN ?? 2);
+        assert.equal(primary.calls, 1);
+        assert.equal(bak.calls, 0, 'no fallback after the first downstream byte');
+        const events = decodeSSE(text);
+        const errors = events.filter(e => e.json?.error);
+        assert.equal(errors.length, c.fail ? 1 : 0, text);
+        if (c.fail) {
+          assert.equal(errors[0].json.error.code, 'upstream_stream_truncated');
+          assert.ok(events.some(e => e.json?.choices?.length), 'initial data was not forwarded');
+        }
+        assert.equal(events.some(e => e.done), !!c.done, 'never invent DONE, preserve it when upstream sent it');
+        for (const event of events) if (event.json?.model) assert.equal(event.json.model, 'multi');
+        assert.ok(!text.includes('private-multi-model') && !text.includes(SECRET));
+        const rows = await waitAudit(s, gw.auditPath);
+        assert.equal(rows?.length, 1);
+        assert.equal(rows[0].status, c.fail ? 502 : 200);
+        assert.equal(rows[0].fallback, false);
+        assert.equal(rows[0].model, 'multi');
+        assert.equal(rows[0].stream_error, c.fail ? 'upstream_stream_truncated' : undefined);
+      });
+    }
+  }
+});

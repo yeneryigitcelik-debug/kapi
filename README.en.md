@@ -234,6 +234,8 @@ Upstream HTTP redirects are rejected; configure `api_base` with the final servic
 
 Even with HTTP `200`, an empty `choices` array or non-object choice members are invalid responses. A stream cannot complete with `[DONE]` or an empty-choice usage chunk before its first real choice; a scoped backup can be tried before output is committed. Empty `choices: []` usage trailers after a real choice, empty text, refusals, tool calls and multiple-choice responses remain supported. This is a basic integrity check, not full provider-schema validation. Usage-trailer ordering follows the [OpenAI stream event reference](https://developers.openai.com/api/reference/resources/chat/subresources/completions/streaming-events).
 
+If an indexed stream ends without `[DONE]`, every observed valid index must have a finish reason. Otherwise, committed output ends with the existing truncated-stream error and a failed audit status; no backup is attempted. Tracking is bounded to 256 distinct non-negative safe-integer indices per stream. Beyond that, `[DONE]` is required; when present it remains authoritative without per-choice finishes. Missing choices are not inferred from the request’s `n`. Indexless streams retain the legacy global-finish rule; mixed indexed/indexless choices are not fully verified.
+
 **Anthropic text bridge.** System/user/assistant text, arrays of text parts, and streaming are supported. Tools, image parts and structured output receive an explanatory `400` instead of being silently discarded. Provider policy refusals do not trigger fallback. Masking applies to standard `model` metadata and gateway-generated errors; generated response text and provider-specific data fields are not rewritten.
 
 **When redaction is enabled** (`security.redact_pii: true`), every non-Ollama provider stays masked by default. Only loopback Ollama endpoints receive the automatic local exemption; remote Ollama is masked. Per-model `redact` overrides that exemption. Use `redact: true` for a local proxy or cloud-backed Ollama model: an endpoint address does not establish where inference runs. Redaction processes configured TCKN/TR IBAN, phone, and e-mail matches in message text; it does not inspect images or tool arguments.
@@ -362,7 +364,7 @@ the next model → finally only metadata is appended to `audit_log`.
 
 ```bash
 node test-e2e.js     # existing 46 unit / end-to-end checks
-node --test test-reliability.js # 13 groups / 94 network, protocol, body-limit and configuration scenarios
+node --test test-reliability.js # 14 groups / 114 network, protocol, body-limit and configuration scenarios
 npm test             # runs both suites; no real provider or key needed
 npm ls --all         # only yaml@2 should appear — the project's whole thesis
 ```
